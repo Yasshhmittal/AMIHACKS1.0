@@ -1,0 +1,165 @@
+generator client {
+  provider             = "prisma-client-py"
+  interface            = "asyncio"
+  recursive_type_depth = 5
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Target {
+  id          Int        @id @default(autoincrement())
+  baseUrl     String     @map("base_url")
+  environment String     @default("sandbox")
+  attestedBy  String?    @map("attested_by")
+  attestedAt  DateTime?  @map("attested_at")
+  createdAt   DateTime   @default(now()) @map("created_at")
+  identities  Identity[]
+  specs       Spec[]
+  scans       Scan[]
+
+  @@map("targets")
+}
+
+model Identity {
+  id                  Int     @id @default(autoincrement())
+  targetId            Int     @map("target_id")
+  label               String  // "userA", "userB", "admin", "anonymous"
+  role                String  // "user", "admin", "anonymous"
+  userId              String? @map("user_id")
+  credentialEncrypted String? @map("credential_encrypted")
+  target              Target  @relation(fields: [targetId], references: [id], onDelete: Cascade)
+
+  @@map("identities")
+}
+
+model Spec {
+  id              Int        @id @default(autoincrement())
+  targetId        Int        @map("target_id")
+  rawHash         String     @map("raw_hash")
+  parsedJson      Json       @map("parsed_json")
+  endpointCount   Int        @map("endpoint_count")
+  createdAt       DateTime   @default(now()) @map("created_at")
+  target          Target     @relation(fields: [targetId], references: [id], onDelete: Cascade)
+  endpoints       Endpoint[]
+  scans           Scan[]
+
+  @@map("specs")
+}
+
+model Endpoint {
+  id             Int          @id @default(autoincrement())
+  specId         Int          @map("spec_id")
+  method         String       // GET, POST, DELETE, etc.
+  path           String       // /orders/{id}
+  operationId    String?      @map("operation_id")
+  summary        String?
+  specSecured    Boolean      @default(false) @map("spec_secured")
+  objectBearing  Boolean      @default(false) @map("object_bearing")
+  adminScoped    Boolean      @default(false) @map("admin_scoped")
+  paramsJson     Json?        @map("params_json")
+  responseFields Json?        @map("response_fields_json")
+  spec           Spec         @relation(fields: [specId], references: [id], onDelete: Cascade)
+  matrixCells    MatrixCell[]
+
+  @@map("endpoints")
+}
+
+model Scan {
+  id           Int          @id @default(autoincrement())
+  targetId     Int          @map("target_id")
+  specId       Int          @map("spec_id")
+  status       String       @default("pending") // pending, running, completed, failed, aborted
+  phase        String?      // Current phase: INVENTORY, SEED, BASELINE, etc.
+  configJson   Json?        @map("config_json")
+  requestsUsed Int          @default(0) @map("requests_used")
+  durationMs   Int?         @map("duration_ms")
+  riskScore    Float?       @map("risk_score")
+  startedAt    DateTime?    @map("started_at")
+  finishedAt   DateTime?    @map("finished_at")
+  createdAt    DateTime     @default(now()) @map("created_at")
+  target       Target       @relation(fields: [targetId], references: [id], onDelete: Cascade)
+  spec         Spec         @relation(fields: [specId], references: [id], onDelete: Cascade)
+  matrixCells  MatrixCell[]
+  probes       Probe[]
+  findings     Finding[]
+  events       ScanEvent[]
+
+  @@map("scans")
+}
+
+model MatrixCell {
+  id                 Int      @id @default(autoincrement())
+  scanId             Int      @map("scan_id")
+  endpointId         Int      @map("endpoint_id")
+  identity           String   // "anonymous", "userA", "userB", "admin"
+  objectId           String?  @map("object_id")
+  objectOwner        String?  @map("object_owner")
+  status             Int      // HTTP status code
+  durationMs         Int?     @map("duration_ms")
+  ownershipMismatch  Boolean  @default(false) @map("ownership_mismatch")
+  undocumentedFields Json?    @map("undocumented_fields")
+  sensitiveFields    Json?    @map("sensitive_fields")
+  requestRedacted    Json?    @map("request_redacted")
+  responseRedacted   Json?    @map("response_redacted")
+  scan               Scan     @relation(fields: [scanId], references: [id], onDelete: Cascade)
+  endpoint           Endpoint @relation(fields: [endpointId], references: [id], onDelete: Cascade)
+
+  @@map("matrix_cells")
+}
+
+model Probe {
+  id                   Int      @id @default(autoincrement())
+  scanId               Int      @map("scan_id")
+  findingId            Int?     @map("finding_id")
+  label                String   // P1, P2, P3, P4, P5, P6
+  identity             String
+  requestJsonRedacted  Json     @map("request_json_redacted")
+  responseJsonRedacted Json     @map("response_json_redacted")
+  status               Int      // HTTP status
+  latencyMs            Int?     @map("latency_ms")
+  scan                 Scan     @relation(fields: [scanId], references: [id], onDelete: Cascade)
+  finding              Finding? @relation(fields: [findingId], references: [id], onDelete: SetNull)
+
+  @@map("probes")
+}
+
+model Finding {
+  id               Int      @id @default(autoincrement())
+  scanId           Int      @map("scan_id")
+  fingerprint      String   // sha256
+  findingClass     String   @map("class") // BOLA, BFLA, EXCESSIVE_DATA_EXPOSURE, etc.
+  owaspId          String   @map("owasp_id") // API1, API2, etc.
+  severity         String   // CRITICAL, HIGH, MEDIUM, LOW, INFO
+  riskScore        Float    @map("risk_score")
+  confidence       String   // VERIFIED, POTENTIAL
+  title            String
+  impact           String?
+  remediation      String?
+  scoreFactorsJson Json     @map("score_factors_json")
+  expected         String?
+  actual           String?
+  state            String   @default("open") // open, fixed
+  aiExplanationMd  String?  @map("ai_explanation_md")
+  createdAt        DateTime @default(now()) @map("created_at")
+  scan             Scan     @relation(fields: [scanId], references: [id], onDelete: Cascade)
+  probes           Probe[]
+
+  @@unique([scanId, fingerprint])
+  @@map("findings")
+}
+
+model ScanEvent {
+  id          Int      @id @default(autoincrement())
+  scanId      Int      @map("scan_id")
+  seq         Int
+  type        String
+  payloadJson Json     @map("payload_json")
+  createdAt   DateTime @default(now()) @map("created_at")
+  scan        Scan     @relation(fields: [scanId], references: [id], onDelete: Cascade)
+
+  @@unique([scanId, seq])
+  @@map("scan_events")
+}

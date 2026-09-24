@@ -1,0 +1,451 @@
+{
+  "scan": {
+    "id": 1,
+    "target_id": 1,
+    "spec_id": 1,
+    "status": "completed",
+    "phase": "COMPLETED",
+    "requests_used": 64,
+    "duration_ms": 2840,
+    "risk_score": 88.5,
+    "started_at": "2026-09-24T12:00:00Z",
+    "finished_at": "2026-09-24T12:00:03Z",
+    "config_json": {
+      "checks": ["BOLA", "BFLA", "EXCESSIVE_DATA_EXPOSURE", "BROKEN_AUTH", "RATE_LIMITING", "MISCONFIGURATION"],
+      "max_requests": 500
+    }
+  },
+  "target": {
+    "id": 1,
+    "base_url": "http://localhost:4000",
+    "environment": "sandbox",
+    "attested_by": "Security Auditor",
+    "attested_at": "2026-09-24T11:59:50Z"
+  },
+  "endpoints": [
+    {
+      "id": 1,
+      "spec_id": 1,
+      "method": "POST",
+      "path": "/auth/login",
+      "operation_id": "loginUser",
+      "summary": "User login",
+      "spec_secured": false,
+      "object_bearing": false,
+      "admin_scoped": false
+    },
+    {
+      "id": 2,
+      "spec_id": 1,
+      "method": "GET",
+      "path": "/users/me",
+      "operation_id": "getMyProfile",
+      "summary": "Get authenticated user profile",
+      "spec_secured": true,
+      "object_bearing": false,
+      "admin_scoped": false
+    },
+    {
+      "id": 3,
+      "spec_id": 1,
+      "method": "GET",
+      "path": "/users/{user_id}",
+      "operation_id": "getUserProfile",
+      "summary": "Get user profile by ID",
+      "spec_secured": true,
+      "object_bearing": true,
+      "admin_scoped": false
+    },
+    {
+      "id": 4,
+      "spec_id": 1,
+      "method": "GET",
+      "path": "/orders",
+      "operation_id": "listOrders",
+      "summary": "List current user orders",
+      "spec_secured": true,
+      "object_bearing": false,
+      "admin_scoped": false
+    },
+    {
+      "id": 5,
+      "spec_id": 1,
+      "method": "GET",
+      "path": "/orders/{order_id}",
+      "operation_id": "getOrder",
+      "summary": "Get order details by ID",
+      "spec_secured": true,
+      "object_bearing": true,
+      "admin_scoped": false
+    },
+    {
+      "id": 6,
+      "spec_id": 1,
+      "method": "GET",
+      "path": "/admin/users",
+      "operation_id": "adminListUsers",
+      "summary": "List all users in system (Admin role required)",
+      "spec_secured": true,
+      "object_bearing": false,
+      "admin_scoped": true
+    },
+    {
+      "id": 7,
+      "spec_id": 1,
+      "method": "GET",
+      "path": "/invoices",
+      "operation_id": "listInvoices",
+      "summary": "List invoices",
+      "spec_secured": true,
+      "object_bearing": false,
+      "admin_scoped": false
+    },
+    {
+      "id": 8,
+      "spec_id": 1,
+      "method": "GET",
+      "path": "/debug/config",
+      "operation_id": "debugConfig",
+      "summary": "Debug configuration endpoint",
+      "spec_secured": false,
+      "object_bearing": false,
+      "admin_scoped": false
+    }
+  ],
+  "matrix": [
+    {
+      "id": 1,
+      "scan_id": 1,
+      "endpoint_id": 5,
+      "identity": "userA",
+      "object_id": "102",
+      "object_owner": "2",
+      "status": 200,
+      "duration_ms": 28,
+      "ownership_mismatch": true,
+      "undocumented_fields": [],
+      "sensitive_fields": []
+    },
+    {
+      "id": 2,
+      "scan_id": 1,
+      "endpoint_id": 5,
+      "identity": "userB",
+      "object_id": "102",
+      "object_owner": "2",
+      "status": 200,
+      "duration_ms": 24,
+      "ownership_mismatch": false,
+      "undocumented_fields": [],
+      "sensitive_fields": []
+    },
+    {
+      "id": 3,
+      "scan_id": 1,
+      "endpoint_id": 5,
+      "identity": "anonymous",
+      "object_id": "102",
+      "object_owner": "2",
+      "status": 401,
+      "duration_ms": 12,
+      "ownership_mismatch": false,
+      "undocumented_fields": [],
+      "sensitive_fields": []
+    },
+    {
+      "id": 4,
+      "scan_id": 1,
+      "endpoint_id": 6,
+      "identity": "userA",
+      "object_id": null,
+      "object_owner": null,
+      "status": 200,
+      "duration_ms": 31,
+      "ownership_mismatch": false,
+      "undocumented_fields": [],
+      "sensitive_fields": []
+    },
+    {
+      "id": 5,
+      "scan_id": 1,
+      "endpoint_id": 6,
+      "identity": "admin",
+      "object_id": null,
+      "object_owner": null,
+      "status": 200,
+      "duration_ms": 29,
+      "ownership_mismatch": false,
+      "undocumented_fields": [],
+      "sensitive_fields": []
+    },
+    {
+      "id": 6,
+      "scan_id": 1,
+      "endpoint_id": 7,
+      "identity": "anonymous",
+      "object_id": null,
+      "object_owner": null,
+      "status": 200,
+      "duration_ms": 18,
+      "ownership_mismatch": false,
+      "undocumented_fields": [],
+      "sensitive_fields": []
+    },
+    {
+      "id": 7,
+      "scan_id": 1,
+      "endpoint_id": 2,
+      "identity": "userA",
+      "object_id": null,
+      "object_owner": null,
+      "status": 200,
+      "duration_ms": 22,
+      "ownership_mismatch": false,
+      "undocumented_fields": ["passwordHash", "internalNotes", "creditScore"],
+      "sensitive_fields": ["passwordHash", "internalNotes", "creditScore"]
+    }
+  ],
+  "findings": [
+    {
+      "id": 1,
+      "scan_id": 1,
+      "fingerprint": "f1_bola_orders_get",
+      "class": "BOLA",
+      "owasp_id": "API1:2023",
+      "severity": "CRITICAL",
+      "risk_score": 90,
+      "confidence": "VERIFIED",
+      "title": "Broken Object Level Authorization on Order Retrieval",
+      "impact": "Attacker (userA) can read confidential purchase history and customer data belonging to victim (userB) by manipulating the order ID in the URL.",
+      "remediation": "Validate that the authenticated user owns the requested order resource before returning the response (e.g. check order.userId == current_user.id).",
+      "expected": "HTTP 403 Forbidden with message 'You do not own this order'",
+      "actual": "HTTP 200 OK returning order #102 with userId: 2 to caller with userId: 1",
+      "state": "open",
+      "score_factors": [
+        {"description": "Authorization boundary crossed", "weight": 40, "applied": true},
+        {"description": "Cross-identity private data returned", "weight": 30, "applied": true},
+        {"description": "Exploitable by low-privilege authenticated user", "weight": 10, "applied": true},
+        {"description": "Repeat verification succeeded", "weight": 10, "applied": true}
+      ],
+      "probes": [
+        {
+          "id": 1,
+          "scan_id": 1,
+          "finding_id": 1,
+          "label": "P1",
+          "identity": "userB",
+          "status": 200,
+          "latency_ms": 25,
+          "request_json_redacted": {
+            "method": "GET",
+            "url": "http://localhost:4000/orders/102",
+            "headers": {"Authorization": "Bearer ***redacted***"}
+          },
+          "response_json_redacted": {
+            "status": 200,
+            "headers": {"content-type": "application/json"},
+            "body": {"id": 102, "userId": 2, "item": "Cyberpunk Hoodie", "amount": 89.5, "status": "shipped"}
+          }
+        },
+        {
+          "id": 2,
+          "scan_id": 1,
+          "finding_id": 1,
+          "label": "P2",
+          "identity": "userA",
+          "status": 200,
+          "latency_ms": 28,
+          "request_json_redacted": {
+            "method": "GET",
+            "url": "http://localhost:4000/orders/102",
+            "headers": {"Authorization": "Bearer ***redacted***"}
+          },
+          "response_json_redacted": {
+            "status": 200,
+            "headers": {"content-type": "application/json"},
+            "body": {"id": 102, "userId": 2, "item": "Cyberpunk Hoodie", "amount": 89.5, "status": "shipped"}
+          }
+        },
+        {
+          "id": 3,
+          "scan_id": 1,
+          "finding_id": 1,
+          "label": "P3",
+          "identity": "userA",
+          "status": 200,
+          "latency_ms": 21,
+          "request_json_redacted": {
+            "method": "GET",
+            "url": "http://localhost:4000/orders/101",
+            "headers": {"Authorization": "Bearer ***redacted***"}
+          },
+          "response_json_redacted": {
+            "status": 200,
+            "headers": {"content-type": "application/json"},
+            "body": {"id": 101, "userId": 1, "item": "Quantum Keyboard", "amount": 199.99, "status": "delivered"}
+          }
+        },
+        {
+          "id": 4,
+          "scan_id": 1,
+          "finding_id": 1,
+          "label": "P4",
+          "identity": "anonymous",
+          "status": 401,
+          "latency_ms": 12,
+          "request_json_redacted": {
+            "method": "GET",
+            "url": "http://localhost:4000/orders/102",
+            "headers": {}
+          },
+          "response_json_redacted": {
+            "status": 401,
+            "headers": {"content-type": "application/json"},
+            "body": {"detail": "Authentication credentials missing or invalid"}
+          }
+        },
+        {
+          "id": 5,
+          "scan_id": 1,
+          "finding_id": 1,
+          "label": "P5",
+          "identity": "userA",
+          "status": 404,
+          "latency_ms": 15,
+          "request_json_redacted": {
+            "method": "GET",
+            "url": "http://localhost:4000/orders/99999",
+            "headers": {"Authorization": "Bearer ***redacted***"}
+          },
+          "response_json_redacted": {
+            "status": 404,
+            "headers": {"content-type": "application/json"},
+            "body": {"detail": "Order not found"}
+          }
+        },
+        {
+          "id": 6,
+          "scan_id": 1,
+          "finding_id": 1,
+          "label": "P6",
+          "identity": "userA",
+          "status": 200,
+          "latency_ms": 27,
+          "request_json_redacted": {
+            "method": "GET",
+            "url": "http://localhost:4000/orders/102",
+            "headers": {"Authorization": "Bearer ***redacted***"}
+          },
+          "response_json_redacted": {
+            "status": 200,
+            "headers": {"content-type": "application/json"},
+            "body": {"id": 102, "userId": 2, "item": "Cyberpunk Hoodie", "amount": 89.5, "status": "shipped"}
+          }
+        }
+      ],
+      "ai_explanation_md": "### Vulnerability Analysis: BOLA on `/orders/{order_id}`\n\n**Severity Rating: Critical (Score: 90/100)**\n\n#### Root Cause\nThe endpoint `/orders/{order_id}` extracts the requested resource identifier from the URL path parameter and retrieves the order object directly from the database without verifying that the `userId` associated with the order matches the `id` of the authenticated user in the `Authorization` bearer token.\n\n#### Impact\nAny authenticated user can enumerate order IDs (e.g. sequentially from 100 to 1000) and dump all customer purchase records across the entire platform, resulting in massive personal and financial data leakage.\n\n#### Remediation (FastAPI / Python)\n```python\n@app.get('/orders/{order_id}')\ndef get_order(order_id: int, current_user = Depends(get_current_user)):\n    order = db.get_order(order_id)\n    if not order:\n        raise HTTPException(status_code=404, detail='Order not found')\n    if order.user_id != current_user.id and current_user.role != 'admin':\n        raise HTTPException(status_code=403, detail='Forbidden')\n    return order\n```"
+    },
+    {
+      "id": 2,
+      "scan_id": 1,
+      "fingerprint": "f2_exposure_users_me",
+      "class": "EXCESSIVE_DATA_EXPOSURE",
+      "owasp_id": "API3:2023",
+      "severity": "HIGH",
+      "risk_score": 70,
+      "confidence": "VERIFIED",
+      "title": "Excessive Data Exposure on User Profile Endpoint",
+      "impact": "Endpoint returns confidential user fields including password hashes (`passwordHash`), internal risk notes (`internalNotes`), and proprietary financial credit scores (`creditScore`) not declared in OpenAPI contract.",
+      "remediation": "Apply data transfer object (DTO) filtering or Pydantic `response_model` with `exclude={'passwordHash', 'internalNotes', 'creditScore'}`.",
+      "expected": "JSON schema containing only id, username, email, role",
+      "actual": "Response contains passwordHash, internalNotes, creditScore",
+      "state": "open",
+      "score_factors": [
+        {"description": "Credential material in response", "weight": 30, "applied": true},
+        {"description": "Sensitive field names present in response", "weight": 20, "applied": true},
+        {"description": "Exploitable by low-privilege user", "weight": 10, "applied": true},
+        {"description": "Repeat verification succeeded", "weight": 10, "applied": true}
+      ],
+      "ai_explanation_md": "### Excessive Data Exposure on `/users/me`\nThe API is serializing internal database records directly to the client without response projection."
+    },
+    {
+      "id": 3,
+      "scan_id": 1,
+      "fingerprint": "f3_bfla_admin_users",
+      "class": "BFLA",
+      "owasp_id": "API5:2023",
+      "severity": "HIGH",
+      "risk_score": 70,
+      "confidence": "VERIFIED",
+      "title": "Broken Function Level Authorization on Admin Endpoint",
+      "impact": "Unprivileged user accounts can access `/admin/users` to retrieve complete user lists and metadata without administrator permissions.",
+      "remediation": "Enforce Role-Based Access Control (RBAC) middleware verifying `current_user.role == 'admin'`.",
+      "expected": "HTTP 403 Forbidden for non-admin callers",
+      "actual": "HTTP 200 OK returning user directory to standard user",
+      "state": "open",
+      "score_factors": [
+        {"description": "Authorization boundary crossed", "weight": 40, "applied": true},
+        {"description": "Administrative function reachable by low-priv user", "weight": 20, "applied": true},
+        {"description": "Repeat verification succeeded", "weight": 10, "applied": true}
+      ],
+      "ai_explanation_md": "### BFLA on `/admin/users`\nRole verification is missing from the endpoint handler."
+    },
+    {
+      "id": 4,
+      "scan_id": 1,
+      "fingerprint": "f4_broken_auth_invoices",
+      "class": "BROKEN_AUTH",
+      "owasp_id": "API2:2023",
+      "severity": "CRITICAL",
+      "risk_score": 95,
+      "confidence": "VERIFIED",
+      "title": "Broken Authentication on Sensitive Invoices Endpoint",
+      "impact": "The OpenAPI spec explicitly mandates Bearer authentication for `/invoices`, but unauthenticated anonymous requests receive HTTP 200 OK and confidential invoices data.",
+      "remediation": "Enforce mandatory authentication middleware on `/invoices` before routing requests.",
+      "expected": "HTTP 401 Unauthorized for anonymous requests",
+      "actual": "HTTP 200 OK with sensitive billing invoices returned without any token",
+      "state": "open",
+      "score_factors": [
+        {"description": "Authorization boundary crossed", "weight": 40, "applied": true},
+        {"description": "Exploitable with no credentials at all", "weight": 15, "applied": true},
+        {"description": "Cross-identity private data returned", "weight": 30, "applied": true},
+        {"description": "Repeat verification succeeded", "weight": 10, "applied": true}
+      ],
+      "ai_explanation_md": "### Broken Authentication on `/invoices`\nAuthentication dependency is missing from the FastAPI route definition."
+    }
+  ],
+  "events": [
+    {"id": 1, "scan_id": 1, "seq": 1, "type": "scan.started", "payload_json": {"target": "http://localhost:4000"}},
+    {"id": 2, "scan_id": 1, "seq": 2, "type": "spec.parsed", "payload_json": {"endpoint_count": 8, "secured_count": 6, "object_bearing_count": 2}},
+    {"id": 3, "scan_id": 1, "seq": 3, "type": "phase.started", "payload_json": {"phase": "INVENTORY"}},
+    {"id": 4, "scan_id": 1, "seq": 4, "type": "phase.started", "payload_json": {"phase": "SEED"}},
+    {"id": 5, "scan_id": 1, "seq": 5, "type": "objects.discovered", "payload_json": {"identity": "userA", "orders": [101, 103]}},
+    {"id": 6, "scan_id": 1, "seq": 6, "type": "objects.discovered", "payload_json": {"identity": "userB", "orders": [102, 104]}},
+    {"id": 7, "scan_id": 1, "seq": 7, "type": "phase.started", "payload_json": {"phase": "BASELINE"}},
+    {"id": 8, "scan_id": 1, "seq": 8, "type": "phase.started", "payload_json": {"phase": "CROSS"}},
+    {"id": 9, "scan_id": 1, "seq": 9, "type": "signal", "payload_json": {"endpoint": "/orders/{order_id}", "signal": "ownership_mismatch"}},
+    {"id": 10, "scan_id": 1, "seq": 10, "type": "candidate", "payload_json": {"class": "BOLA", "endpoint": "/orders/{order_id}"}},
+    {"id": 11, "scan_id": 1, "seq": 11, "type": "confirm.started", "payload_json": {"candidates": 4}},
+    {"id": 12, "scan_id": 1, "seq": 12, "type": "finding", "payload_json": {"class": "BOLA", "severity": "CRITICAL", "confidence": "VERIFIED"}},
+    {"id": 13, "scan_id": 1, "seq": 13, "type": "scan.completed", "payload_json": {"total_findings": 4, "duration_ms": 2840}}
+  ],
+  "summary": {
+    "text": "SentinelAPI completed an automated Zero-Trust authorization sweep across 8 endpoints and identified 4 confirmed vulnerabilities, including 2 Critical severity flaws (BOLA on order retrieval and Broken Authentication on confidential invoices). Immediate remediation is recommended for object authorization boundaries.",
+    "total_endpoints": 8,
+    "total_requests": 64,
+    "findings_by_severity": {
+      "CRITICAL": 2,
+      "HIGH": 2,
+      "MEDIUM": 0,
+      "LOW": 0,
+      "INFO": 0
+    },
+    "findings_by_class": {
+      "BOLA": 1,
+      "EXCESSIVE_DATA_EXPOSURE": 1,
+      "BFLA": 1,
+      "BROKEN_AUTH": 1
+    },
+    "risk_score": 88.5
+  }
+}

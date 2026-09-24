@@ -1,0 +1,57 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: sentinel_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: sentinel
+      POSTGRES_PASSWORD: sentinel_password
+      POSTGRES_DB: sentinelapi
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sentinel -d sentinelapi"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  sentinelshop:
+    build:
+      context: .
+      dockerfile: Dockerfile.sentinelshop
+    container_name: sentinelshop_target
+    restart: unless-stopped
+    ports:
+      - "4000:4000"
+    environment:
+      SENTINELSHOP_PORT: "4000"
+      SENTINELSHOP_HOST: "0.0.0.0"
+
+  sentinel:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sentinel_engine
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: "postgresql://sentinel:sentinel_password@postgres:5432/sentinelapi"
+      GROQ_API_KEY: "${GROQ_API_KEY}"
+      SENTINEL_ALLOW_PUBLIC: "0"
+      SENTINEL_PORT: "8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      sentinelshop:
+        condition: service_started
+    volumes:
+      - ./engine:/app/engine
+      - ./prisma:/app/prisma
+
+volumes:
+  pgdata:
