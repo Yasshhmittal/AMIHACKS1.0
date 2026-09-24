@@ -2,6 +2,7 @@ services:
   - type: web
     name: sentinel-backend
     env: docker
+    rootDir: sentinelapi
     dockerfilePath: ./Dockerfile
     plan: free
     
@@ -27,6 +28,7 @@ services:
   - type: web
     name: sentinel-shop
     env: docker
+    rootDir: sentinelapi
     dockerfilePath: ./Dockerfile.sentinelshop
     plan: free
     envVars:
