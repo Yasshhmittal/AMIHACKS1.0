@@ -1,0 +1,34 @@
+services:
+  sentinelshop:
+    build:
+      context: .
+      dockerfile: Dockerfile.sentinelshop
+    container_name: sentinelshop_target
+    restart: unless-stopped
+    ports:
+      - "4000:4000"
+    environment:
+      SENTINELSHOP_PORT: "4000"
+      SENTINELSHOP_HOST: "0.0.0.0"
+
+  sentinel:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sentinel_engine
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: "sqlite:////data/sentinel.db"
+      GROQ_API_KEY: "${GROQ_API_KEY:-}"
+      SENTINEL_ALLOW_PUBLIC: "0"
+      SENTINEL_PORT: "8000"
+    volumes:
+      - sentineldata:/data
+    depends_on:
+      sentinelshop:
+        condition: service_started
+
+volumes:
+  sentineldata:

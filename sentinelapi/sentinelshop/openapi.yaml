@@ -1,0 +1,274 @@
+openapi: 3.0.3
+info:
+  title: SentinelShop API
+  description: >
+    E-commerce API contract for security audit. This document declares the
+    INTENDED SECURE behaviour. Any divergence the scanner observes at runtime is
+    a finding (spec drift). Owner/id hints for object-level checks are published
+    under x-sentinel-collection-hints so the scanner can prove ownership.
+  version: 1.0.0
+servers:
+  - url: http://sentinelshop:4000
+    description: Docker network
+  - url: http://localhost:4000
+    description: Local
+
+x-sentinel-collection-hints:
+  - path: /orders
+    idField: id
+    ownerField: userId
+  - path: /users
+    idField: id
+    ownerField: id
+  - path: /invoices
+    idField: id
+    ownerField: userId
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+  schemas:
+    Order:
+      type: object
+      required: [id, userId, item, amount, status]
+      properties:
+        id: {type: integer}
+        userId: {type: integer}
+        item: {type: string}
+        amount: {type: number}
+        status: {type: string}
+    PublicUser:
+      type: object
+      required: [id, username, email, role]
+      properties:
+        id: {type: integer}
+        username: {type: string}
+        email: {type: string}
+        role: {type: string}
+    Invoice:
+      type: object
+      required: [id, userId, invoiceNumber, amount, tax]
+      properties:
+        id: {type: integer}
+        userId: {type: integer}
+        invoiceNumber: {type: string}
+        amount: {type: number}
+        tax: {type: number}
+
+security:
+  - BearerAuth: []
+
+paths:
+  /auth/login:
+    post:
+      summary: User login
+      operationId: loginUser
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: {type: string}
+                password: {type: string}
+      responses:
+        '200':
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token: {type: string}
+                  token_type: {type: string}
+                  userId: {type: string}
+                  role: {type: string}
+        '401': {description: Invalid credentials}
+
+  /auth/register:
+    post:
+      summary: Register new user
+      operationId: registerUser
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, email, password]
+              properties:
+                username: {type: string}
+                email: {type: string}
+                password: {type: string}
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: {type: integer}
+                  username: {type: string}
+                  email: {type: string}
+
+  /auth/logout:
+    post:
+      summary: User logout
+      operationId: logoutUser
+      responses:
+        '200': {description: Logged out}
+
+  /users/me:
+    get:
+      summary: Get authenticated user profile
+      operationId: getMyProfile
+      responses:
+        '200':
+          description: Current user profile
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, username, email, role]
+                properties:
+                  id: {type: integer}
+                  username: {type: string}
+                  email: {type: string}
+                  role: {type: string}
+
+  /users/{user_id}:
+    get:
+      summary: Get a user profile by id
+      operationId: getUserProfile
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema: {type: integer}
+      responses:
+        '200':
+          description: User profile
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, username, email, role]
+                properties:
+                  id: {type: integer}
+                  username: {type: string}
+                  email: {type: string}
+                  role: {type: string}
+        '403': {description: Forbidden}
+        '404': {description: Not found}
+
+  /orders:
+    get:
+      summary: List my orders
+      operationId: listOrders
+      responses:
+        '200':
+          description: Orders owned by the caller
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/Order'}
+    post:
+      summary: Create an order
+      operationId: createOrder
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [item, amount]
+              properties:
+                item: {type: string}
+                amount: {type: number}
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Order'}
+
+  /orders/{order_id}:
+    get:
+      summary: Get an order by id
+      operationId: getOrder
+      parameters:
+        - name: order_id
+          in: path
+          required: true
+          schema: {type: integer}
+      responses:
+        '200':
+          description: Order
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Order'}
+        '403': {description: Forbidden}
+        '404': {description: Not found}
+    delete:
+      summary: Delete an order by id
+      operationId: deleteOrder
+      parameters:
+        - name: order_id
+          in: path
+          required: true
+          schema: {type: integer}
+      responses:
+        '200': {description: Deleted}
+        '403': {description: Forbidden}
+        '404': {description: Not found}
+
+  /admin/users:
+    get:
+      summary: List all users (admin only)
+      operationId: adminListUsers
+      responses:
+        '200':
+          description: All users
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/PublicUser'}
+        '403': {description: Forbidden}
+
+  /admin/dashboard:
+    get:
+      summary: Admin dashboard metrics (admin only)
+      operationId: adminDashboard
+      responses:
+        '200': {description: Metrics}
+        '403': {description: Forbidden}
+
+  /invoices:
+    get:
+      summary: List invoices
+      operationId: listInvoices
+      responses:
+        '200':
+          description: Invoices
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/Invoice'}
+
+  /health:
+    get:
+      summary: Health check
+      operationId: healthCheck
+      security: []
+      responses:
+        '200': {description: OK}
