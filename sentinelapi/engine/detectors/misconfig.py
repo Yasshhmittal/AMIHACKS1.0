@@ -12,7 +12,6 @@ from urllib.parse import urlparse
 from ..core.evidence import generate_fingerprint
 from ..core.executor import HttpExecutor
 from ..core.risk_engine import calculate_severity
-from ..ingest.api_model import NormalizedEndpoint
 from .base import BaseDetector, FindingCandidate
 
 DEBUG_PATHS = ["/debug/config", "/debug", "/.env", "/actuator", "/actuator/env"]

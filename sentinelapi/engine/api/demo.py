@@ -8,14 +8,10 @@ from sqlmodel import select
 
 from ..db import get_session
 from ..models.schemas import FixToggleRequest, SimpleStatus
-from ..models.tables import Scan, Target
-from ..runtime import target_base_url
-
-router = APIRouter(prefix="/api/demo", tags=["demo"])
-
-# maps scanner vuln_id -> SentinelShop fix flag
+from ..models.tables import Target
 from sentinelshop.fixes import VULN_TO_FIX  # type: ignore
 
+router = APIRouter(prefix="/api/demo", tags=["demo"])
 
 def _latest_sandbox_base() -> str:
     with get_session() as s:

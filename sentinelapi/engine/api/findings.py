@@ -10,11 +10,10 @@ from ..ai import get_ai_provider
 from ..core.evidence import build_pocs
 from ..core.executor import HttpExecutor
 from ..core.guard import SafetyGuard
-from ..core.session import IdentitySession
 from ..db import get_session
 from ..models.schemas import (ExplainResponse, FindingResponse, PoCResponse,
                               ProbeModel, ReverifyResponse, ScoreFactor)
-from ..models.tables import Endpoint, Finding, Probe, Scan, Spec, Target
+from ..models.tables import Finding, Probe, Scan, Target
 from ..runtime import load_identities
 
 router = APIRouter(prefix="/api/findings", tags=["findings"])

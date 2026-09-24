@@ -18,7 +18,7 @@ from .core.sweep import AccessMatrixSweep
 from .db import get_session
 from .ingest.api_model import NormalizedEndpoint
 from .models.tables import (Endpoint, Finding, Identity, MatrixCell, Probe,
-                            Scan, ScanEvent, Spec, Target)
+                            Scan, ScanEvent, Target)
 
 logger = logging.getLogger("sentinel.runtime")
 

@@ -77,7 +77,6 @@ async def stream_scan(scan_id: int):
         q = scan_queues.get(scan_id)
         if not q:
             return
-        seen = len(scan_history.get(scan_id, []))
         while True:
             try:
                 ev = await asyncio.wait_for(q.get(), timeout=30)

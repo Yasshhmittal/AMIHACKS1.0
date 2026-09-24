@@ -1,0 +1,36 @@
+services:
+  - type: web
+    name: sentinel-backend
+    env: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    
+    # Note: Render Free Tier uses an ephemeral filesystem. Your SQLite database
+    # will reset whenever the server sleeps or deploys. For a hackathon, this is
+    # usually fine! If you need persistent data across restarts, you can uncomment
+    # the disk section below, but it requires a Render Starter plan ($7/mo).
+    # disk:
+    #   name: sentinel-data
+    #   mountPath: /data
+    #   sizeGB: 1
+
+    envVars:
+      - key: DATABASE_URL
+        value: sqlite:////app/sentinel.db # DB created inside the container
+      - key: GROQ_API_KEY
+        sync: false # Requires manual entry in Render Dashboard
+      - key: SENTINEL_ALLOW_PUBLIC
+        value: "1"
+      - key: SENTINEL_PORT
+        value: "8000"
+
+  - type: web
+    name: sentinel-shop
+    env: docker
+    dockerfilePath: ./Dockerfile.sentinelshop
+    plan: free
+    envVars:
+      - key: SENTINELSHOP_PORT
+        value: "4000"
+      - key: SENTINELSHOP_HOST
+        value: "0.0.0.0"

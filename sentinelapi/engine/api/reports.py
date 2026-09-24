@@ -1,9 +1,8 @@
 """AI/template summary + report export (JSON / HTML / SARIF)."""
 from __future__ import annotations
 
-import json
 
-from fastapi import APIRouter, Header, HTTPException, Response
+from fastapi import APIRouter, Header, HTTPException
 from fastapi.responses import JSONResponse
 
 from ..ai import get_ai_provider
