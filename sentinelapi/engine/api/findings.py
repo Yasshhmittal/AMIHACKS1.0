@@ -1,155 +1,138 @@
-from fastapi import APIRouter, HTTPException
-import httpx
-from typing import Optional, Dict, Any
+"""Finding detail, PoC, AI explain, and re-verify (re-runs the REAL test)."""
+from __future__ import annotations
 
-from ..models.schemas import FindingResponse, FindingPoCResponse, AIExplainResponse, ScoreFactor, ProbeModel
-from ..core.evidence import build_curl_poc, build_httpie_poc, build_python_poc
-from ..ai.groq_provider import GroqProvider
-from .scans import scan_in_memory_results
+from typing import List, Optional
+
+from fastapi import APIRouter, HTTPException
+from sqlmodel import Session, select
+
+from ..ai import get_ai_provider
+from ..core.evidence import build_pocs
+from ..core.executor import HttpExecutor
+from ..core.guard import SafetyGuard
+from ..core.session import IdentitySession
+from ..db import get_session
+from ..models.schemas import (ExplainResponse, FindingResponse, PoCResponse,
+                              ProbeModel, ReverifyResponse, ScoreFactor)
+from ..models.tables import Endpoint, Finding, Probe, Scan, Spec, Target
+from ..runtime import load_identities
 
 router = APIRouter(prefix="/api/findings", tags=["findings"])
-ai_provider = GroqProvider()
 
-def find_in_memory_finding(finding_id: int):
-    for scan_res in scan_in_memory_results.values():
-        findings = scan_res.get("findings", [])
-        if 1 <= finding_id <= len(findings):
-            return findings[finding_id - 1]
-    return None
+
+def finding_to_response(row: Finding, session: Session, include_probes: bool = True) -> FindingResponse:
+    factors = [ScoreFactor(**sf) for sf in (row.score_factors_json or [])]
+    probes: Optional[List[ProbeModel]] = None
+    if include_probes:
+        prows = session.exec(select(Probe).where(Probe.finding_id == row.id)).all()
+        probes = [ProbeModel(id=p.id, label=p.label, identity=p.identity, status=p.status,
+                             latency_ms=p.latency_ms, request_json_redacted=p.request_json_redacted,
+                             response_json_redacted=p.response_json_redacted) for p in prows]
+    return FindingResponse(
+        id=row.id, scan_id=row.scan_id, fingerprint=row.fingerprint,
+        finding_class=row.finding_class, owasp_id=row.owasp_id, severity=row.severity,
+        risk_score=row.risk_score, confidence=row.confidence, title=row.title,
+        impact=row.impact, remediation=row.remediation, score_factors=factors,
+        expected=row.expected, actual=row.actual, endpoint=row.endpoint,
+        vuln_id=row.vuln_id, state=row.state, ai_explanation_md=row.ai_explanation_md,
+        probes=probes)
+
 
 @router.get("/{finding_id}", response_model=FindingResponse)
-async def get_finding_detail(finding_id: int):
-    f = find_in_memory_finding(finding_id)
-    if not f:
-        # Fallback dummy finding if requested before first scan
-        from ..detectors.base import FindingCandidate
-        f = FindingCandidate(
-            finding_class="BOLA",
-            owasp_id="API1:2023",
-            endpoint_path="/orders/{order_id}",
-            endpoint_method="GET",
-            operation_id="getOrder",
-            title="Broken Object Level Authorization on /orders/{order_id}",
-            impact="userA can access order 102 belonging to userB.",
-            remediation="Enforce owner_id check on resource lookup.",
-            expected="HTTP 403 Forbidden",
-            actual="HTTP 200 OK returning victim order",
-            severity="CRITICAL",
-            risk_score=90.0,
-            confidence="VERIFIED",
-            score_factors=["auth_boundary_crossed", "cross_identity_data", "exploitable_low_priv", "repeat_verified"],
-            probes=[]
-        )
+async def get_finding(finding_id: int):
+    with get_session() as s:
+        row = s.get(Finding, finding_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="Finding not found")
+        return finding_to_response(row, s, include_probes=True)
 
-    probes_models = [
-        ProbeModel(
-            label=p["label"],
-            identity=p["identity"],
-            status=p["status"],
-            latency_ms=p.get("latency_ms"),
-            request_json_redacted=p["request_json_redacted"],
-            response_json_redacted=p["response_json_redacted"]
-        )
-        for p in getattr(f, "probes", [])
-    ]
 
-    return FindingResponse(
-        id=finding_id,
-        scan_id=1,
-        fingerprint=getattr(f, "fingerprint", f"f_{finding_id}"),
-        finding_class=f.finding_class,
-        owasp_id=f.owasp_id,
-        severity=f.severity,
-        risk_score=f.risk_score,
-        confidence=f.confidence,
-        title=f.title,
-        impact=f.impact,
-        remediation=f.remediation,
-        score_factors=[
-            ScoreFactor(description=factor.replace("_", " ").capitalize(), weight=20, applied=True)
-            for factor in getattr(f, "score_factors", [])
-        ],
-        expected=f.expected,
-        actual=f.actual,
-        state="open",
-        probes=probes_models
-    )
+@router.get("/{finding_id}/poc", response_model=PoCResponse)
+async def get_poc(finding_id: int):
+    with get_session() as s:
+        row = s.get(Finding, finding_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="Finding not found")
+        method, path = (row.endpoint or "GET /").split(" ", 1) if row.endpoint else ("GET", "/")
+        scan = s.get(Scan, row.scan_id)
+        target = s.get(Target, scan.target_id) if scan else None
+        base = target.base_url if target else "http://sentinelshop:4000"
+        url = f"{base}{path}"
+        pocs = build_pocs(method, url)
+        return PoCResponse(finding_id=finding_id, **pocs)
 
-@router.get("/{finding_id}/poc", response_model=FindingPoCResponse)
-async def get_finding_poc(finding_id: int):
-    f = find_in_memory_finding(finding_id)
-    url = "http://localhost:4000/orders/102"
-    method = "GET"
-    if f:
-        method = f.endpoint_method
-        path = f.endpoint_path.replace("{order_id}", "102").replace("{id}", "102")
-        url = f"http://localhost:4000{path}"
 
-    headers = {"Authorization": "Bearer $USER_A_TOKEN"}
-    return FindingPoCResponse(
-        finding_id=finding_id,
-        curl=build_curl_poc(method, url, headers, token_placeholder="$USER_A_TOKEN"),
-        httpie=build_httpie_poc(method, url, headers),
-        python_code=build_python_poc(method, url, headers)
-    )
+@router.post("/{finding_id}/explain", response_model=ExplainResponse)
+async def explain_finding(finding_id: int):
+    with get_session() as s:
+        row = s.get(Finding, finding_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="Finding not found")
+        if row.ai_explanation_md:
+            return ExplainResponse(finding_id=finding_id, explanation_md=row.ai_explanation_md,
+                                   provider="cached")
+        payload = {"finding_class": row.finding_class, "owasp_id": row.owasp_id,
+                   "endpoint": row.endpoint, "severity": row.severity,
+                   "expected": row.expected, "actual": row.actual, "impact": row.impact}
+    provider = get_ai_provider()
+    text = await provider.explain(payload)
+    with get_session() as s:
+        row = s.get(Finding, finding_id)
+        row.ai_explanation_md = text
+        s.add(row)
+    return ExplainResponse(finding_id=finding_id, explanation_md=text, provider=provider.name)
 
-@router.post("/{finding_id}/verify")
-async def verify_finding(finding_id: int):
-    """
-    CRITICAL DEMO MOMENT:
-    Re-executes the live HTTP request against SentinelShop to verify whether the flaw is STILL VULNERABLE or FIXED!
-    Never returns a cached result.
-    """
-    f = find_in_memory_finding(finding_id)
-    endpoint_path = "/orders/102"
-    method = "GET"
-    headers = {"Authorization": "Bearer token-alice-12345"}
 
-    if f:
-        method = f.endpoint_method
-        path = f.endpoint_path.replace("{order_id}", "102").replace("{id}", "102")
-        endpoint_path = path
+@router.post("/{finding_id}/verify", response_model=ReverifyResponse)
+async def reverify_finding(finding_id: int):
+    """Re-execute the decisive request against the LIVE target. Never cached —
+    this is the product's central claim."""
+    with get_session() as s:
+        row = s.get(Finding, finding_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="Finding not found")
+        scan = s.get(Scan, row.scan_id)
+        target = s.get(Target, scan.target_id)
+        base = target.base_url
+        # find the decisive probe (P2 attack; else the first probe)
+        probes = s.exec(select(Probe).where(Probe.finding_id == finding_id)).all()
+        decisive = next((p for p in probes if p.label == "P2"), probes[0] if probes else None)
+        finding_class = row.finding_class
+        identities = load_identities(scan.target_id)
 
-    async with httpx.AsyncClient(timeout=5.0) as client:
-        try:
-            res = await client.request(method, f"http://localhost:4000{endpoint_path}", headers=headers)
-            
-            # If request still succeeds with 200, still vulnerable!
-            # If 403 or 401 or 404, it is FIXED!
-            if res.status_code == 200:
-                return {
-                    "status": "still_vulnerable",
-                    "status_code": res.status_code,
-                    "message": f"Verification confirmed flaw persists! Target returned HTTP {res.status_code}."
-                }
-            else:
-                return {
-                    "status": "fixed",
-                    "status_code": res.status_code,
-                    "message": f"Verification confirmed fix is effective! Target returned HTTP {res.status_code}."
-                }
-        except Exception as e:
-            return {
-                "status": "error",
-                "message": f"Could not re-verify against target: {str(e)}"
-            }
+    if not decisive:
+        raise HTTPException(status_code=400, detail="No probe evidence to re-verify")
 
-@router.post("/{finding_id}/explain", response_model=AIExplainResponse)
-async def explain_finding_ai(finding_id: int):
-    f = find_in_memory_finding(finding_id)
-    finding_dict = {
-        "class": getattr(f, "finding_class", "BOLA"),
-        "owasp_id": getattr(f, "owasp_id", "API1:2023"),
-        "endpoint_method": getattr(f, "endpoint_method", "GET"),
-        "endpoint_path": getattr(f, "endpoint_path", "/orders/{order_id}"),
-        "expected": getattr(f, "expected", "HTTP 403 Forbidden"),
-        "actual": getattr(f, "actual", "HTTP 200 OK"),
-        "confidence": getattr(f, "confidence", "VERIFIED")
-    }
+    method = decisive.request_json_redacted.get("method", "GET")
+    url = decisive.request_json_redacted.get("url", "")
+    ident = identities.get(decisive.identity)
+    headers = ident.get_auth_headers() if ident else {}
 
-    explanation_md = await ai_provider.explain(finding_dict)
-    return AIExplainResponse(
-        finding_id=finding_id,
-        explanation_md=explanation_md,
-        source="groq" if ai_provider.reasoning_llm else "template_fallback"
-    )
+    guard = SafetyGuard(base)
+    executor = HttpExecutor(guard)
+    try:
+        res = await executor.execute(method, url, headers=headers)
+    finally:
+        await executor.close()
+
+    # decide fixed vs still-vulnerable per class
+    if finding_class in ("BOLA", "BFLA", "BROKEN_AUTH"):
+        fixed = res.status in (401, 403) or not res.ok
+    elif finding_class == "EXCESSIVE_DATA_EXPOSURE":
+        from ..core.comparator import find_sensitive_fields
+        fixed = not find_sensitive_fields(res.body)
+    elif finding_class == "RATE_LIMITING":
+        fixed = res.status == 429
+    elif finding_class == "MISCONFIGURATION":
+        fixed = not res.ok
+    else:
+        fixed = not res.ok
+
+    status = "fixed" if fixed else "still-vulnerable"
+    with get_session() as s:
+        row = s.get(Finding, finding_id)
+        row.state = "fixed" if fixed else "open"
+        s.add(row)
+    detail = (f"Re-ran {method} {url} live → HTTP {res.status}. "
+              + ("Authorization now enforced." if fixed else "Still returns protected data."))
+    return ReverifyResponse(finding_id=finding_id, status=status, detail=detail)

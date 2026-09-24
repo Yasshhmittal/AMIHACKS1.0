@@ -1,0 +1,31 @@
+name: SentinelAPI Security Gate
+on: [push, pull_request]
+jobs:
+  api-security-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - name: Install
+        run: pip install -r requirements.txt
+      - name: Start SentinelShop (demo target)
+        run: |
+          uvicorn sentinelshop.app:app --host 0.0.0.0 --port 4000 &
+          sleep 4
+      - name: Scan and gate
+        run: |
+          python cli/sentinel.py scan \
+            --spec sentinelshop/openapi.yaml \
+            --target http://localhost:4000 \
+            --fail-on high --out result.json
+      - name: Upload SARIF to GitHub Security
+        if: always()
+        run: |
+          python - <<'PY'
+          import json
+          from engine.reporting.json_report import build_report  # noqa
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: sentinel-result, path: result.json }

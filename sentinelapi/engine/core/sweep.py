@@ -1,275 +1,237 @@
-import asyncio
-import json
+"""Access Matrix sweep — the orchestrator.
+
+One systematic sweep of (identity x endpoint x object) produces every finding
+class from one request budget and one evidence pipeline.
+
+  INVENTORY -> SEED -> BASELINE -> CROSS -> ANON -> DERIVE -> CONFIRM -> SCORE+EMIT
+"""
+from __future__ import annotations
+
 import time
-from typing import Dict, List, Any, Optional, Callable, AsyncGenerator
-from ..ingest.api_model import NormalizedEndpoint
-from .executor import HttpExecutor
-from .session import IdentitySession
-from .guard import SafetyGuard
-from .comparator import find_sensitive_fields, unwrap_envelope
-from .evidence import generate_fingerprint, build_curl_poc
-from .risk_engine import calculate_severity
-from ..detectors.bola import BolaDetector
+from typing import Any, Callable, Dict, List, Optional
+
+from ..detectors.base import FindingCandidate
 from ..detectors.bfla import BflaDetector
+from ..detectors.bola import BolaDetector
 from ..detectors.broken_auth import BrokenAuthDetector
 from ..detectors.data_exposure import ExcessiveDataExposureDetector
-from ..detectors.rate_limit import RateLimitDetector
 from ..detectors.misconfig import MisconfigDetector
-from ..detectors.base import FindingCandidate
+from ..detectors.rate_limit import RateLimitDetector
+from ..ingest.api_model import NormalizedEndpoint
+from .comparator import find_sensitive_fields
+from .executor import HttpExecutor
+from .guard import GuardViolation, SafetyGuard
+from .session import IdentitySession
+
+# check id -> which finding classes it enables
+CHECK_CLASSES = {
+    "bola": {"BOLA"},
+    "broken_auth": {"BROKEN_AUTH"},
+    "data_exposure": {"EXCESSIVE_DATA_EXPOSURE"},
+    "rate_limit": {"RATE_LIMITING"},
+    "bfla": {"BFLA"},
+    "misconfig": {"MISCONFIGURATION"},
+}
+
 
 class AccessMatrixSweep:
-    def __init__(
-        self,
-        target_base_url: str,
-        endpoints: List[NormalizedEndpoint],
-        identities: Dict[str, IdentitySession],
-        event_callback: Optional[Callable[[str, Dict[str, Any]], None]] = None
-    ):
-        self.target_base_url = target_base_url.rstrip("/")
+    def __init__(self, target_base_url: str, endpoints: List[NormalizedEndpoint],
+                 identities: Dict[str, IdentitySession],
+                 checks: Optional[List[str]] = None,
+                 event_callback: Optional[Callable[[str, Dict[str, Any]], None]] = None):
+        self.base_url = target_base_url.rstrip("/")
         self.endpoints = endpoints
         self.identities = identities
-        self.event_callback = event_callback
-        
-        self.guard = SafetyGuard(self.target_base_url)
+        self.checks = set(checks) if checks else set(CHECK_CLASSES.keys())
+        self.emit = event_callback or (lambda t, p: None)
+
+        self.guard = SafetyGuard(self.base_url)
         self.executor = HttpExecutor(self.guard)
 
-        # Detectors
-        self.bola_detector = BolaDetector()
-        self.bfla_detector = BflaDetector()
-        self.broken_auth_detector = BrokenAuthDetector()
-        self.exposure_detector = ExcessiveDataExposureDetector()
-        self.rate_limit_detector = RateLimitDetector()
-        self.misconfig_detector = MisconfigDetector()
+        self.bola = BolaDetector()
+        self.bfla = BflaDetector()
+        self.broken_auth = BrokenAuthDetector()
+        self.exposure = ExcessiveDataExposureDetector()
+        self.rate_limit = RateLimitDetector()
+        self.misconfig = MisconfigDetector()
 
-        # Telemetry & Results
         self.matrix_cells: List[Dict[str, Any]] = []
         self.findings: List[FindingCandidate] = []
-        self.discovered_objects: Dict[str, List[str]] = {} # e.g. {"userA": ["101", "103"], "userB": ["102", "104"]}
+        self.discovered: Dict[str, List[str]] = {}
+        self.aborted_reason: Optional[str] = None
 
-    def emit_event(self, event_type: str, payload: Dict[str, Any]):
-        if self.event_callback:
-            self.event_callback(event_type, payload)
+    def _enabled(self, finding_class: str) -> bool:
+        return any(finding_class in CHECK_CLASSES[c] for c in self.checks if c in CHECK_CLASSES)
+
+    def _emit_finding(self, f: FindingCandidate) -> None:
+        self.findings.append(f)
+        self.emit("finding", {"class": f.finding_class, "severity": f.severity,
+                              "confidence": f.confidence, "endpoint": f.endpoint,
+                              "title": f.title})
 
     async def run(self) -> Dict[str, Any]:
-        """
-        Executes the 8-phase Access Matrix sweep.
-        """
-        start_time = time.perf_counter()
-        self.emit_event("scan.started", {"target": self.target_base_url, "endpoint_count": len(self.endpoints)})
-
+        start = time.perf_counter()
+        self.emit("scan.started", {"target": self.base_url, "endpoint_count": len(self.endpoints)})
         try:
-            # PHASE 1: INVENTORY
-            self.emit_event("phase.started", {"phase": "INVENTORY"})
-            secured_count = sum(1 for ep in self.endpoints if ep.spec_secured)
-            object_bearing_count = sum(1 for ep in self.endpoints if ep.object_bearing)
-            self.emit_event("spec.parsed", {
-                "endpoint_count": len(self.endpoints),
-                "secured_count": secured_count,
-                "object_bearing_count": object_bearing_count
-            })
-
-            # PHASE 2: SEED (Learn owned object IDs from collection endpoints like /orders)
-            self.emit_event("phase.started", {"phase": "SEED"})
-            for ident_label in ("userA", "userB"):
-                ident = self.identities.get(ident_label)
-                if not ident:
-                    continue
-                self.discovered_objects[ident_label] = []
-                for ep in self.endpoints:
-                    if ep.method == "GET" and not ep.object_bearing and "order" in ep.path.lower():
-                        url = f"{self.target_base_url}{ep.path}"
-                        res = await self.executor.execute("GET", url, headers=ident.get_auth_headers())
-                        if res.ok and isinstance(res.body, list):
-                            for item in res.body:
-                                if isinstance(item, dict) and "id" in item:
-                                    self.discovered_objects[ident_label].append(str(item["id"]))
-                
-                # Fallback to defaults if dynamic discovery was empty
-                if not self.discovered_objects[ident_label]:
-                    self.discovered_objects[ident_label] = ["101", "103"] if ident_label == "userA" else ["102", "104"]
-
-                self.emit_event("objects.discovered", {
-                    "identity": ident_label,
-                    "objects": self.discovered_objects[ident_label]
-                })
-
-            # PHASE 3: BASELINE (Every endpoint x Every identity)
-            self.emit_event("phase.started", {"phase": "BASELINE"})
-            for ep in self.endpoints:
-                if ep.object_bearing:
-                    continue  # Object-bearing tested in cross phase
-
-                for ident_label, ident in self.identities.items():
-                    url = f"{self.target_base_url}{ep.path}"
-                    res = await self.executor.execute(ep.method, url, headers=ident.get_auth_headers())
-
-                    sensitive_f = find_sensitive_fields(res.body) if res.ok else []
-                    cell = {
-                        "endpoint_id": getattr(ep, "id", None),
-                        "method": ep.method,
-                        "path": ep.path,
-                        "identity": ident_label,
-                        "object_id": None,
-                        "object_owner": None,
-                        "status": res.status,
-                        "duration_ms": int(res.latency_ms),
-                        "ownership_mismatch": False,
-                        "undocumented_fields": [],
-                        "sensitive_fields": sensitive_f
-                    }
-                    self.matrix_cells.append(cell)
-                    self.emit_event("probe", {
-                        "endpoint": ep.path,
-                        "identity": ident_label,
-                        "status": res.status,
-                        "latency_ms": int(res.latency_ms)
-                    })
-
-                    # If 2xx and returned sensitive fields -> Excessive Data Exposure candidate!
-                    if res.ok and sensitive_f:
-                        self.emit_event("signal", {"endpoint": ep.path, "signal": "sensitive_fields_detected"})
-                        exp_finding = await self.exposure_detector.analyze_response(
-                            self.executor, self.target_base_url, ep, ident, res
-                        )
-                        if exp_finding:
-                            self.findings.append(exp_finding)
-                            self.emit_event("finding", {
-                                "class": exp_finding.finding_class,
-                                "severity": exp_finding.severity,
-                                "confidence": exp_finding.confidence,
-                                "endpoint": ep.path
-                            })
-
-            # PHASE 4: CROSS SWEEP & BOLA (Hero Detector)
-            self.emit_event("phase.started", {"phase": "CROSS"})
-            user_a = self.identities.get("userA")
-            user_b = self.identities.get("userB")
-            anon = self.identities.get("anonymous", IdentitySession("anonymous", "anonymous"))
-
-            if user_a and user_b:
-                bob_objs = self.discovered_objects.get("userB", ["102"])
-                alice_objs = self.discovered_objects.get("userA", ["101"])
-
-                for ep in self.endpoints:
-                    if ep.object_bearing and ep.method == "GET":
-                        bob_id = bob_objs[0] if bob_objs else "102"
-                        alice_id = alice_objs[0] if alice_objs else "101"
-
-                        self.emit_event("signal", {"endpoint": ep.path, "signal": "testing_bola_6probes"})
-                        bola_candidate = await self.bola_detector.probe_endpoint(
-                            self.executor, self.target_base_url, ep, user_a, user_b, anon, bob_id, alice_id
-                        )
-
-                        if bola_candidate:
-                            self.findings.append(bola_candidate)
-                            self.emit_event("finding", {
-                                "class": bola_candidate.finding_class,
-                                "severity": bola_candidate.severity,
-                                "confidence": bola_candidate.confidence,
-                                "endpoint": ep.path
-                            })
-
-                            # Record in matrix cells
-                            self.matrix_cells.append({
-                                "endpoint_id": getattr(ep, "id", None),
-                                "method": ep.method,
-                                "path": ep.path,
-                                "identity": "userA",
-                                "object_id": bob_id,
-                                "object_owner": "userB",
-                                "status": 200,
-                                "duration_ms": 28,
-                                "ownership_mismatch": True,
-                                "undocumented_fields": [],
-                                "sensitive_fields": []
-                            })
-
-            # PHASE 5: ANON & BROKEN AUTH
-            self.emit_event("phase.started", {"phase": "ANON"})
-            for ep in self.endpoints:
-                if ep.spec_secured and not ep.object_bearing:
-                    auth_cand = await self.broken_auth_detector.probe_endpoint(
-                        self.executor, self.target_base_url, ep, anon, user_a or user_b
-                    )
-                    if auth_cand:
-                        self.findings.append(auth_cand)
-                        self.emit_event("finding", {
-                            "class": auth_cand.finding_class,
-                            "severity": auth_cand.severity,
-                            "confidence": auth_cand.confidence,
-                            "endpoint": ep.path
-                        })
-
-            # PHASE 6: DERIVE (BFLA, Rate Limiting, Misconfig)
-            self.emit_event("phase.started", {"phase": "DERIVE"})
-            admin_user = self.identities.get("admin")
-            if admin_user and user_a:
-                for ep in self.endpoints:
-                    if ep.admin_scoped:
-                        bfla_cand = await self.bfla_detector.probe_endpoint(
-                            self.executor, self.target_base_url, ep, user_a, admin_user, anon
-                        )
-                        if bfla_cand:
-                            self.findings.append(bfla_cand)
-                            self.emit_event("finding", {
-                                "class": bfla_cand.finding_class,
-                                "severity": bfla_cand.severity,
-                                "confidence": bfla_cand.confidence,
-                                "endpoint": ep.path
-                            })
-
-            # Rate limiting check
-            login_ep = next((ep for ep in self.endpoints if "login" in ep.path.lower() and ep.method == "POST"), None)
-            if login_ep:
-                rl_cand = await self.rate_limit_detector.probe_login(self.executor, self.target_base_url, login_ep)
-                if rl_cand:
-                    self.findings.append(rl_cand)
-                    self.emit_event("finding", {
-                        "class": rl_cand.finding_class,
-                        "severity": rl_cand.severity,
-                        "confidence": rl_cand.confidence,
-                        "endpoint": login_ep.path
-                    })
-
-            # Misconfiguration check
-            misconfig_cands = await self.misconfig_detector.probe_security_headers_and_cors(
-                self.executor, self.target_base_url
-            )
-            for mc in misconfig_cands:
-                self.findings.append(mc)
-                self.emit_event("finding", {
-                    "class": mc.finding_class,
-                    "severity": mc.severity,
-                    "confidence": mc.confidence,
-                    "endpoint": mc.endpoint_path
-                })
-
-            # Deduplicate findings by fingerprint
-            unique_findings = []
-            seen_fps = set()
-            for f in self.findings:
-                if f.fingerprint not in seen_fps:
-                    seen_fps.add(f.fingerprint)
-                    unique_findings.append(f)
-            self.findings = unique_findings
-
-            duration_ms = int((time.perf_counter() - start_time) * 1000)
-            overall_risk = max((f.risk_score for f in self.findings), default=0.0)
-
-            self.emit_event("scan.completed", {
-                "total_findings": len(self.findings),
-                "total_requests": self.guard.request_count,
-                "duration_ms": duration_ms,
-                "risk_score": overall_risk
-            })
-
-            return {
-                "duration_ms": duration_ms,
-                "requests_used": self.guard.request_count,
-                "risk_score": overall_risk,
-                "matrix_cells": self.matrix_cells,
-                "findings": self.findings
-            }
-
+            await self._inventory()
+            await self._seed()
+            await self._baseline()
+            await self._cross()
+            await self._anon()
+            await self._derive()
+            self._confirm_and_dedup()
+        except GuardViolation as gv:
+            self.aborted_reason = self.guard.aborted_reason or "guard_violation"
+            self.emit("scan.aborted", {"reason": self.aborted_reason, "detail": str(gv)})
         finally:
             await self.executor.close()
+
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        risk = max((f.risk_score for f in self.findings), default=0.0)
+        self.emit("scan.completed", {
+            "total_findings": len(self.findings),
+            "total_requests": self.guard.request_count,
+            "duration_ms": duration_ms, "risk_score": risk,
+            "aborted": self.aborted_reason,
+        })
+        return {
+            "duration_ms": duration_ms, "requests_used": self.guard.request_count,
+            "risk_score": risk, "matrix_cells": self.matrix_cells,
+            "findings": self.findings, "aborted_reason": self.aborted_reason,
+        }
+
+    # ---- phase 1 ----
+    async def _inventory(self):
+        self.emit("phase.started", {"phase": "INVENTORY"})
+        self.emit("spec.parsed", {
+            "endpoint_count": len(self.endpoints),
+            "secured_count": sum(1 for e in self.endpoints if e.spec_secured),
+            "object_bearing_count": sum(1 for e in self.endpoints if e.object_bearing),
+        })
+
+    # ---- phase 2 ----
+    async def _seed(self):
+        self.emit("phase.started", {"phase": "SEED"})
+        for label in ("userA", "userB"):
+            ident = self.identities.get(label)
+            if not ident:
+                continue
+            found: List[str] = []
+            for ep in self.endpoints:
+                if ep.method == "GET" and not ep.object_bearing and "order" in ep.path.lower():
+                    res = await self.executor.execute("GET", f"{self.base_url}{ep.path}",
+                                                      headers=ident.get_auth_headers())
+                    if res.ok and isinstance(res.body, list):
+                        found += [str(o["id"]) for o in res.body if isinstance(o, dict) and "id" in o]
+            if not found:
+                found = ["101", "103"] if label == "userA" else ["102", "104"]
+            self.discovered[label] = found
+            self.emit("objects.discovered", {"identity": label, "objects": found})
+
+    # ---- phase 3 ----
+    async def _baseline(self):
+        self.emit("phase.started", {"phase": "BASELINE"})
+        for ep in self.endpoints:
+            if ep.object_bearing:
+                continue
+            # Baseline only reads. State-changing methods are never fired blindly;
+            # the rate-limit detector handles the login endpoint on its own.
+            if ep.method not in ("GET", "HEAD", "OPTIONS"):
+                continue
+            for label, ident in self.identities.items():
+                res = await self.executor.execute(ep.method, f"{self.base_url}{ep.path}",
+                                                  headers=ident.get_auth_headers())
+                sensitive = find_sensitive_fields(res.body) if res.ok else []
+                self.matrix_cells.append({
+                    "endpoint_id": ep.id, "method": ep.method, "path": ep.path, "identity": label,
+                    "object_id": None, "object_owner": None, "status": res.status,
+                    "duration_ms": int(res.latency_ms), "ownership_mismatch": False,
+                    "undocumented_fields": [], "sensitive_fields": sensitive,
+                })
+                self.emit("probe", {"endpoint": ep.path, "identity": label,
+                                    "status": res.status, "latency_ms": int(res.latency_ms)})
+                if res.ok and self._enabled("EXCESSIVE_DATA_EXPOSURE"):
+                    cand = await self.exposure.analyze_response(self.executor, self.base_url, ep, ident, res)
+                    if cand:
+                        self.emit("signal", {"endpoint": ep.path, "identity": label,
+                                            "signal": "sensitive_fields"})
+                        self._emit_finding(cand)
+
+    # ---- phase 4 ----
+    async def _cross(self):
+        self.emit("phase.started", {"phase": "CROSS"})
+        if not self._enabled("BOLA"):
+            return
+        a, b = self.identities.get("userA"), self.identities.get("userB")
+        anon = self.identities.get("anonymous") or IdentitySession("anonymous", "anonymous")
+        if not (a and b):
+            return
+        for ep in self.endpoints:
+            if ep.object_bearing and ep.method == "GET":
+                # Choose object ids that match the resource type: for a /users/{id}
+                # endpoint the object IS the user id; otherwise use the collection
+                # ids learned in SEED (orders, etc.).
+                if "user" in ep.path.lower() and "me" not in ep.path.lower():
+                    bob_id = str(b.user_id or (self.discovered.get("userB") or ["2"])[0])
+                    alice_id = str(a.user_id or (self.discovered.get("userA") or ["1"])[0])
+                else:
+                    bob_id = (self.discovered.get("userB") or ["102"])[0]
+                    alice_id = (self.discovered.get("userA") or ["101"])[0]
+                self.emit("signal", {"endpoint": ep.path, "identity": "userA", "signal": "bola_6probe"})
+                cand = await self.bola.probe_endpoint(self.executor, self.base_url, ep,
+                                                      a, b, anon, bob_id, alice_id)
+                if cand:
+                    self.matrix_cells.append({
+                        "endpoint_id": ep.id, "method": ep.method, "path": ep.path,
+                        "identity": "userA", "object_id": bob_id, "object_owner": "userB",
+                        "status": 200, "duration_ms": None, "ownership_mismatch": True,
+                        "undocumented_fields": [], "sensitive_fields": [],
+                    })
+                    self._emit_finding(cand)
+
+    # ---- phase 5 ----
+    async def _anon(self):
+        self.emit("phase.started", {"phase": "ANON"})
+        if not self._enabled("BROKEN_AUTH"):
+            return
+        anon = self.identities.get("anonymous") or IdentitySession("anonymous", "anonymous")
+        valid = self.identities.get("userA") or self.identities.get("userB")
+        for ep in self.endpoints:
+            if ep.spec_secured and not ep.object_bearing:
+                cand = await self.broken_auth.probe_endpoint(self.executor, self.base_url, ep, anon, valid)
+                if cand:
+                    self._emit_finding(cand)
+
+    # ---- phase 6 ----
+    async def _derive(self):
+        self.emit("phase.started", {"phase": "DERIVE"})
+        a = self.identities.get("userA")
+        admin = self.identities.get("admin")
+        anon = self.identities.get("anonymous") or IdentitySession("anonymous", "anonymous")
+        if self._enabled("BFLA") and a and admin:
+            for ep in self.endpoints:
+                if ep.admin_scoped:
+                    cand = await self.bfla.probe_endpoint(self.executor, self.base_url, ep, a, admin, anon)
+                    if cand:
+                        self._emit_finding(cand)
+        if self._enabled("RATE_LIMITING"):
+            login = next((e for e in self.endpoints if "login" in e.path.lower() and e.method == "POST"), None)
+            if login:
+                cand = await self.rate_limit.probe_login(self.executor, self.base_url, login)
+                if cand:
+                    self._emit_finding(cand)
+        if self._enabled("MISCONFIGURATION"):
+            for cand in await self.misconfig.probe(self.executor, self.base_url):
+                self._emit_finding(cand)
+
+    # ---- phases 7 + 8 ----
+    def _confirm_and_dedup(self):
+        self.emit("phase.started", {"phase": "CONFIRM"})
+        self.emit("confirm.started", {"finding_count": len(self.findings)})
+        seen, unique = set(), []
+        for f in self.findings:
+            if f.fingerprint not in seen:
+                seen.add(f.fingerprint)
+                unique.append(f)
+        self.findings = unique
+        self.emit("phase.started", {"phase": "SCORE"})

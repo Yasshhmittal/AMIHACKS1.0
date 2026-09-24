@@ -1,93 +1,70 @@
-from typing import Optional, List, Dict, Any
-from .base import BaseDetector, FindingCandidate
-from ..core.executor import HttpExecutor, ExecutionResult
-from ..core.comparator import find_sensitive_fields, flatten_keys
-from ..core.risk_engine import calculate_severity
+"""Excessive Data Exposure (OWASP API3:2023).
+
+A 2xx JSON body contains a field that is undocumented in the response schema OR
+matches a sensitive name/value pattern.
+"""
+from __future__ import annotations
+
+from typing import Optional
+
+from ..core.comparator import (find_sensitive_fields, undocumented_fields,
+                               unwrap_envelope)
 from ..core.evidence import generate_fingerprint
-from ..ingest.api_model import NormalizedEndpoint
+from ..core.executor import ExecutionResult, HttpExecutor
+from ..core.risk_engine import calculate_severity
 from ..core.session import IdentitySession
+from ..ingest.api_model import NormalizedEndpoint
+from .base import BaseDetector, FindingCandidate
+
+CREDENTIAL_MARKERS = ("passwordhash", "password", "_hash", "secret", "token", "apikey", "privatekey")
+
 
 class ExcessiveDataExposureDetector(BaseDetector):
     def __init__(self):
         super().__init__(name="EXCESSIVE_DATA_EXPOSURE", owasp_id="API3:2023")
 
-    async def analyze_response(
-        self,
-        executor: HttpExecutor,
-        target_base_url: str,
-        endpoint: NormalizedEndpoint,
-        user: IdentitySession,
-        res: ExecutionResult
-    ) -> Optional[FindingCandidate]:
-        """
-        Analyzes a 2xx response body against declared schema and sensitive pattern dictionaries.
-        """
-        if not res.ok or not isinstance(res.body, (dict, list)):
+    async def analyze_response(self, executor: HttpExecutor, base_url: str,
+                               endpoint: NormalizedEndpoint, identity: IdentitySession,
+                               res: ExecutionResult) -> Optional[FindingCandidate]:
+        if not res.ok:
+            return None
+        sensitive = find_sensitive_fields(res.body)
+        undoc = undocumented_fields(unwrap_envelope(res.body), endpoint.documented_response_fields) \
+            if endpoint.documented_response_fields else []
+        if not sensitive and not undoc:
             return None
 
-        # 1. Identify sensitive field names and values
-        sensitive_found = find_sensitive_fields(res.body)
+        url = f"{base_url}{endpoint.path}"
+        probes: list[dict] = []
+        self.record_probe(probes, "P1", identity.label, endpoint.method, url, identity.get_auth_headers(), res)
 
-        # 2. Identify undocumented fields
-        undocumented_found = []
-        if endpoint.response_schema_fields:
-            declared_set = set(f.lower() for f in endpoint.response_schema_fields)
-            pairs = flatten_keys(res.body)
-            for path, val in pairs:
-                leaf = path.split(".")[-1].lower()
-                if leaf not in declared_set and not leaf.isdigit():
-                    undocumented_found.append(path)
+        factors = ["sensitive_field_names"] if sensitive else ["undocumented_only"]
+        has_credential = any(any(mk in s.lower() for mk in CREDENTIAL_MARKERS) for s in sensitive)
+        if has_credential:
+            factors.append("credential_material")
+        if undoc and sensitive:
+            factors.append("undocumented_only")
 
-        if not sensitive_found and not undocumented_found:
-            return None
+        severity, risk, score_factors = calculate_severity(factors)
+        confidence = "VERIFIED" if sensitive else "POTENTIAL"
+        # Exposure is a property of the endpoint, not the caller — role-independent
+        # fingerprint so the same leak isn't reported once per identity.
+        fp = generate_fingerprint(base_url, self.name, endpoint.operation_id,
+                                  ",".join(sensitive[:3]) or "undoc", "*")
 
-        factors = []
-        impact_reasons = []
-
-        # Check for credential material
-        has_credentials = any("hash" in f.lower() or "secret" in f.lower() or "token" in f.lower() for f in sensitive_found)
-        if has_credentials:
-            factors.append("credential_material_leaked")
-            impact_reasons.append("Credential or cryptographic material was exposed in client-accessible JSON.")
-
-        if sensitive_found:
-            factors.append("sensitive_field_names")
-            impact_reasons.append(f"Sensitive fields detected: {', '.join(sensitive_found[:5])}.")
-
-        factors.append("exploitable_low_priv")
-        factors.append("repeat_verified")
-
-        severity, risk_score, _ = calculate_severity(factors)
-        fingerprint = generate_fingerprint(target_base_url, self.name, endpoint.operation_id, attacker_role=user.role)
-
-        url = f"{target_base_url}{endpoint.path}"
-        probe = {
-            "label": "ExposureCheck",
-            "identity": user.label,
-            "status": res.status,
-            "latency_ms": int(res.latency_ms),
-            "request_json_redacted": {"method": endpoint.method, "url": url, "headers": user.get_auth_headers()},
-            "response_json_redacted": {"status": res.status, "headers": res.headers, "body": res.body}
-        }
-
+        leaked = ", ".join(sorted(set(s.split(".")[-1] for s in (sensitive or undoc)))[:6])
         return FindingCandidate(
-            finding_class=self.name,
-            owasp_id=self.owasp_id,
-            endpoint_path=endpoint.path,
-            endpoint_method=endpoint.method,
+            finding_class=self.name, owasp_id=self.owasp_id,
+            endpoint_path=endpoint.path, endpoint_method=endpoint.method,
             operation_id=endpoint.operation_id,
             title=f"Excessive Data Exposure on {endpoint.path}",
-            impact=" ".join(impact_reasons),
-            remediation=(
-                "Implement selective response projection or Data Transfer Objects (DTOs) "
-                "to ensure only fields documented in the API specification are returned to the client."
-            ),
-            expected=f"Response adhering strictly to schema ({len(endpoint.response_schema_fields)} declared fields)",
-            actual=f"Exposed {len(sensitive_found)} sensitive fields: {', '.join(sensitive_found[:6])}",
-            severity=severity,
-            risk_score=risk_score,
-            confidence="VERIFIED",
-            score_factors=factors,
-            probes=[probe],
-            fingerprint=fingerprint
+            impact=(f"The response exposes fields the client should not receive: {leaked}. "
+                    + ("Credential/cryptographic material is among them. " if has_credential else "")
+                    + "These are returned to any caller who can reach the endpoint."),
+            remediation=("Return an explicit response DTO containing only the documented fields. "
+                         "Never serialize the internal model directly."),
+            expected="Response limited to documented, non-sensitive fields",
+            actual=f"Response includes sensitive/undocumented fields: {leaked}",
+            severity=severity, risk_score=risk, confidence=confidence,
+            score_factors=score_factors, probes=probes, fingerprint=fp, vuln_id="V4",
         )

@@ -1,111 +1,116 @@
-import re
+"""OpenAPI 3.x ingestion via prance ($ref resolution, JSON + YAML) with a plain
+PyYAML/json fallback. Produces the normalized endpoint inventory.
+"""
+from __future__ import annotations
+
 import json
+from typing import Any, Dict, List, Optional, Set, Tuple
+
 import yaml
-from typing import Dict, Any, List, Tuple
-from .api_model import NormalizedEndpoint
+
+from .api_model import (NormalizedEndpoint, classify_admin_scoped,
+                        classify_object_bearing, extract_path_params)
+
+HTTP_METHODS = {"get", "post", "put", "patch", "delete", "options", "head"}
+
+
+def _load_raw(spec_text: str) -> Dict[str, Any]:
+    text = spec_text.strip()
+    if text.startswith("{"):
+        return json.loads(text)
+    return yaml.safe_load(text)
+
+
+def _resolve_with_prance(spec_text: str) -> Optional[Dict[str, Any]]:
+    try:
+        import tempfile
+        import os
+        from prance import ResolvingParser
+
+        suffix = ".json" if spec_text.strip().startswith("{") else ".yaml"
+        with tempfile.NamedTemporaryFile("w", suffix=suffix, delete=False) as fh:
+            fh.write(spec_text)
+            tmp = fh.name
+        try:
+            parser = ResolvingParser(tmp, strict=False, backend="openapi-spec-validator")
+            return parser.specification
+        finally:
+            os.unlink(tmp)
+    except Exception:
+        return None
+
 
 def resolve_spec_secured(op: Dict[str, Any], spec: Dict[str, Any]) -> bool:
-    """
-    OpenAPI 3 Rule:
-    Operation-level security overrides top-level.
-    `security: []` explicitly declares an endpoint as public!
-    """
+    """operation-level security:[] means explicitly public and overrides the doc default."""
     if "security" in op:
         return len(op["security"]) > 0
     if "security" in spec:
         return len(spec["security"]) > 0
     return False
 
-def extract_schema_field_names(schema: Dict[str, Any]) -> List[str]:
-    """Recursively collects property names declared in response schema."""
-    fields = []
-    if not isinstance(schema, dict):
-        return fields
-        
-    if "properties" in schema and isinstance(schema["properties"], dict):
-        for k, v in schema["properties"].items():
-            fields.append(k)
-            fields.extend(extract_schema_field_names(v))
-    elif "items" in schema and isinstance(schema["items"], dict):
-        fields.extend(extract_schema_field_names(schema["items"]))
-        
-    return list(set(fields))
 
-def parse_openapi_spec(raw_content: str) -> Tuple[Dict[str, Any], List[NormalizedEndpoint]]:
-    """
-    Parses OpenAPI 3.x spec from JSON or YAML string.
-    Returns parsed dictionary and list of NormalizedEndpoint objects.
-    """
-    try:
-        spec_dict = json.loads(raw_content)
-    except Exception:
-        spec_dict = yaml.safe_load(raw_content)
+def _documented_response_fields(op: Dict[str, Any]) -> Set[str]:
+    fields: Set[str] = set()
 
-    endpoints: List[NormalizedEndpoint] = []
-    paths = spec_dict.get("paths", {})
+    def walk(schema: Any):
+        if not isinstance(schema, dict):
+            return
+        if schema.get("type") == "object" or "properties" in schema:
+            for name, sub in (schema.get("properties") or {}).items():
+                fields.add(name)
+                walk(sub)
+        if "items" in schema:
+            walk(schema["items"])
+        for key in ("allOf", "anyOf", "oneOf"):
+            for sub in schema.get(key, []) or []:
+                walk(sub)
 
-    for path, path_item in paths.items():
-        if not isinstance(path_item, dict):
+    for resp in (op.get("responses") or {}).values():
+        if not isinstance(resp, dict):
             continue
+        for content in (resp.get("content") or {}).values():
+            walk(content.get("schema") or {})
+    return fields
 
-        for method in ("get", "post", "put", "delete", "patch", "options", "head"):
-            if method not in path_item:
+
+def _owner_hints(spec: Dict[str, Any]) -> List[Dict[str, str]]:
+    return spec.get("x-sentinel-collection-hints", []) or []
+
+
+def _hint_for_path(path: str, hints: List[Dict[str, str]]) -> Optional[str]:
+    # match the longest hint prefix
+    best = None
+    for h in hints:
+        hp = h.get("path", "")
+        if path.startswith(hp) and (best is None or len(hp) > len(best.get("path", ""))):
+            best = h
+    return best.get("ownerField") if best else None
+
+
+def parse_openapi_spec(spec_text: str) -> Tuple[List[NormalizedEndpoint], Dict[str, Any]]:
+    """Return (endpoints, raw_spec_dict)."""
+    raw = _resolve_with_prance(spec_text) or _load_raw(spec_text)
+    hints = _owner_hints(raw)
+    endpoints: List[NormalizedEndpoint] = []
+
+    for path, item in (raw.get("paths") or {}).items():
+        if not isinstance(item, dict):
+            continue
+        for method, op in item.items():
+            if method.lower() not in HTTP_METHODS or not isinstance(op, dict):
                 continue
-
-            op = path_item[method]
-            if not isinstance(op, dict):
-                continue
-
-            operation_id = op.get("operationId", f"{method}_{path.replace('/', '_').replace('{', '').replace('}', '')}")
-            summary = op.get("summary", "")
-            
-            # Security determination
-            is_secured = resolve_spec_secured(op, spec_dict)
-
-            # Object bearing determination (contains path parameters like {id})
-            path_params = re.findall(r"\{([a-zA-Z0-9_]+)\}", path)
-            is_object_bearing = len(path_params) > 0
-
-            # Admin scoped determination
-            is_admin_scoped = ("/admin/" in path.lower()) or ("admin" in summary.lower()) or ("admin" in operation_id.lower())
-
-            # Response schema fields extraction for 2xx responses
-            response_fields = []
-            responses = op.get("responses", {})
-            for code, res_obj in responses.items():
-                if str(code).startswith("2") and isinstance(res_obj, dict):
-                    content = res_obj.get("content", {})
-                    for media_type in ("application/json", "*/*"):
-                        if media_type in content:
-                            schema = content[media_type].get("schema", {})
-                            response_fields.extend(extract_schema_field_names(schema))
-
-            # Query params
-            query_params = []
-            for param in op.get("parameters", []):
-                if isinstance(param, dict) and param.get("in") == "query":
-                    query_params.append(param.get("name", ""))
-
-            # Owner hint heuristic
-            owner_hint = None
-            if "order" in path.lower():
-                owner_hint = "userId"
-            elif "user" in path.lower():
-                owner_hint = "id"
-
-            endpoints.append(NormalizedEndpoint(
+            secured = resolve_spec_secured(op, raw)
+            ep = NormalizedEndpoint(
                 method=method.upper(),
                 path=path,
-                operation_id=operation_id,
-                summary=summary,
-                spec_secured=is_secured,
-                object_bearing=is_object_bearing,
-                admin_scoped=is_admin_scoped,
-                path_params=path_params,
-                query_params=query_params,
-                response_schema_fields=list(set(response_fields)),
-                owner_hint=owner_hint,
-                raw_operation=op
-            ))
-
-    return spec_dict, endpoints
+                operation_id=op.get("operationId"),
+                summary=op.get("summary"),
+                spec_secured=secured,
+                object_bearing=classify_object_bearing(path),
+                admin_scoped=classify_admin_scoped(path, op.get("summary")),
+                path_params=extract_path_params(path),
+                documented_response_fields=_documented_response_fields(op),
+                owner_hint=_hint_for_path(path, hints),
+            )
+            endpoints.append(ep)
+    return endpoints, raw

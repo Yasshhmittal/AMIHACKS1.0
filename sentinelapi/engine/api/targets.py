@@ -1,225 +1,140 @@
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Depends
-from typing import List, Optional
-import httpx
-import json
-from ..models.schemas import (
-    TargetCreate, TargetResponse, SpecUploadResponse,
-    IdentityCreate, IdentityResponse, VerifyIdentitiesResponse, IdentityVerificationResult,
-    EndpointSchema
-)
-from ..core.guard import SafetyGuard
-from ..core.session import vault, IdentitySession
+"""Target, spec upload, identity config, and credential verification."""
+from __future__ import annotations
+
+import hashlib
+from datetime import datetime, timezone
+from typing import List
+
+from fastapi import APIRouter, File, HTTPException, UploadFile
+from sqlmodel import delete, select
+
+from ..core.executor import HttpExecutor
+from ..core.guard import GuardViolation, SafetyGuard
+from ..core.session import IdentitySession, vault
+from ..db import get_session
 from ..ingest.openapi_parser import parse_openapi_spec
-from ..db import get_db
+from ..models.schemas import (EndpointResponse, IdentityIn, SpecUploadResponse,
+                              TargetCreate, TargetResponse, VerifyResponse,
+                              VerifyResultItem)
+from ..models.tables import Endpoint, Identity, Spec, Target
 
 router = APIRouter(prefix="/api/targets", tags=["targets"])
 
-# In-memory store fallback when DB client is initializing or running in memory
-in_memory_targets = {}
-in_memory_specs = {}
-in_memory_identities = {}
 
 @router.post("", response_model=TargetResponse)
-async def create_target(payload: TargetCreate):
-    # Enforce allowlist check
-    if not SafetyGuard.is_allowlisted_host(payload.base_url.split("://")[-1].split("/")[0].split(":")[0]):
-        raise HTTPException(
-            status_code=400,
-            detail="Target host is outside the authorized allowlist. Scanning unauthorized hosts is prohibited."
-        )
+async def create_target(body: TargetCreate):
+    # allowlist is enforced here too, before anything is stored
+    try:
+        SafetyGuard(body.base_url)
+    except GuardViolation as gv:
+        raise HTTPException(status_code=400, detail=str(gv))
+    with get_session() as s:
+        t = Target(base_url=body.base_url, environment=body.environment,
+                   attested_by=body.attested_by, attested_at=datetime.now(timezone.utc))
+        s.add(t)
+        s.flush()
+        return TargetResponse(id=t.id, base_url=t.base_url, environment=t.environment,
+                              attested_by=t.attested_by,
+                              attested_at=t.attested_at.isoformat() if t.attested_at else None)
 
-    db = get_db()
-    if db and db.is_connected():
-        target = await db.target.create(
-            data={
-                "baseUrl": payload.base_url,
-                "environment": payload.environment,
-                "attestedBy": payload.attested_by
-            }
-        )
-        return TargetResponse(
-            id=target.id,
-            base_url=target.baseUrl,
-            environment=target.environment,
-            attested_by=target.attestedBy,
-            attested_at=target.attestedAt
-        )
-    else:
-        new_id = len(in_memory_targets) + 1
-        t_data = {
-            "id": new_id,
-            "base_url": payload.base_url,
-            "environment": payload.environment,
-            "attested_by": payload.attested_by,
-            "attested_at": None
-        }
-        in_memory_targets[new_id] = t_data
-        return TargetResponse(**t_data)
 
 @router.post("/{target_id}/spec", response_model=SpecUploadResponse)
 async def upload_spec(target_id: int, file: UploadFile = File(...)):
-    content = await file.read()
-    raw_str = content.decode("utf-8")
-
-    spec_dict, endpoints = parse_openapi_spec(raw_str)
+    raw = (await file.read()).decode("utf-8", errors="replace")
+    try:
+        endpoints, parsed = parse_openapi_spec(raw)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Could not parse OpenAPI spec: {exc}")
     if not endpoints:
-        raise HTTPException(status_code=400, detail="No valid endpoints found in uploaded specification.")
+        raise HTTPException(status_code=422, detail="No endpoints found in spec.")
 
-    secured_count = sum(1 for ep in endpoints if ep.spec_secured)
-    object_bearing_count = sum(1 for ep in endpoints if ep.object_bearing)
-    admin_scoped_count = sum(1 for ep in endpoints if ep.admin_scoped)
-
-    ep_schemas = [
-        EndpointSchema(
-            id=idx + 1,
-            method=ep.method,
-            path=ep.path,
-            operation_id=ep.operation_id,
-            summary=ep.summary,
-            spec_secured=ep.spec_secured,
-            object_bearing=ep.object_bearing,
-            admin_scoped=ep.admin_scoped,
-            params_json={"path_params": ep.path_params, "query_params": ep.query_params},
-            response_fields_json=ep.response_schema_fields
-        )
-        for idx, ep in enumerate(endpoints)
-    ]
-
-    db = get_db()
-    if db and db.is_connected():
-        spec = await db.spec.create(
-            data={
-                "targetId": target_id,
-                "rawHash": str(hash(raw_str)),
-                "parsedJson": json.dumps(spec_dict),
-                "endpointCount": len(endpoints),
-                "endpoints": {
-                    "create": [
-                        {
-                            "method": ep.method,
-                            "path": ep.path,
-                            "operationId": ep.operation_id,
-                            "summary": ep.summary,
-                            "specSecured": ep.spec_secured,
-                            "objectBearing": ep.object_bearing,
-                            "adminScoped": ep.admin_scoped,
-                            "paramsJson": json.dumps({"path_params": ep.path_params, "query_params": ep.query_params}),
-                            "responseFields": json.dumps(ep.response_schema_fields)
-                        }
-                        for ep in endpoints
-                    ]
-                }
-            },
-            include={"endpoints": True}
-        )
-        spec_id = spec.id
-    else:
-        spec_id = len(in_memory_specs) + 1
-        in_memory_specs[spec_id] = {
-            "spec_id": spec_id,
-            "target_id": target_id,
-            "spec_dict": spec_dict,
-            "endpoints": endpoints
-        }
-
-    return SpecUploadResponse(
-        spec_id=spec_id,
-        target_id=target_id,
-        endpoint_count=len(endpoints),
-        secured_count=secured_count,
-        object_bearing_count=object_bearing_count,
-        admin_scoped_count=admin_scoped_count,
-        endpoints=ep_schemas
-    )
-
-@router.post("/{target_id}/identities", response_model=List[IdentityResponse])
-async def configure_identities(target_id: int, identities: List[IdentityCreate]):
-    created_list = []
-    db = get_db()
-
-    for ident in identities:
-        enc_cred = vault.encrypt_credential(ident.credential) if ident.credential else None
-        if db and db.is_connected():
-            rec = await db.identity.create(
-                data={
-                    "targetId": target_id,
-                    "label": ident.label,
-                    "role": ident.role,
-                    "userId": ident.user_id,
-                    "credentialEncrypted": enc_cred
-                }
+    with get_session() as s:
+        if not s.get(Target, target_id):
+            raise HTTPException(status_code=404, detail="Target not found")
+        spec = Spec(target_id=target_id, raw_hash=hashlib.sha256(raw.encode()).hexdigest(),
+                    parsed_json={"info": parsed.get("info", {})}, endpoint_count=len(endpoints))
+        s.add(spec)
+        s.flush()
+        out_eps: List[EndpointResponse] = []
+        for ep in endpoints:
+            row = Endpoint(
+                spec_id=spec.id, method=ep.method, path=ep.path,
+                operation_id=ep.operation_id, summary=ep.summary,
+                spec_secured=ep.spec_secured, object_bearing=ep.object_bearing,
+                admin_scoped=ep.admin_scoped,
+                params_json={"path_params": ep.path_params, "owner_hint": ep.owner_hint},
+                response_fields_json={"fields": sorted(ep.documented_response_fields)},
             )
-            created_list.append(IdentityResponse(
-                id=rec.id,
-                target_id=rec.targetId,
-                label=rec.label,
-                role=rec.role,
-                user_id=rec.userId
-            ))
-        else:
-            nid = len(in_memory_identities) + 1
-            rec_data = {
-                "id": nid,
-                "target_id": target_id,
-                "label": ident.label,
-                "role": ident.role,
-                "user_id": ident.user_id,
-                "credential": ident.credential
-            }
-            in_memory_identities[nid] = rec_data
-            created_list.append(IdentityResponse(**rec_data))
+            s.add(row)
+            s.flush()
+            out_eps.append(EndpointResponse(
+                id=row.id, spec_id=spec.id, method=ep.method, path=ep.path,
+                operation_id=ep.operation_id, summary=ep.summary,
+                spec_secured=ep.spec_secured, object_bearing=ep.object_bearing,
+                admin_scoped=ep.admin_scoped))
+        return SpecUploadResponse(
+            spec_id=spec.id, endpoint_count=len(out_eps),
+            secured_count=sum(1 for e in out_eps if e.spec_secured),
+            object_bearing_count=sum(1 for e in out_eps if e.object_bearing),
+            admin_count=sum(1 for e in out_eps if e.admin_scoped),
+            endpoints=out_eps)
 
-    return created_list
 
-@router.post("/{target_id}/verify", response_model=VerifyIdentitiesResponse)
+@router.post("/{target_id}/identities")
+async def set_identities(target_id: int, identities: List[IdentityIn]):
+    with get_session() as s:
+        if not s.get(Target, target_id):
+            raise HTTPException(status_code=404, detail="Target not found")
+        s.exec(delete(Identity).where(Identity.target_id == target_id))
+        for i in identities:
+            enc = vault.encrypt(i.credential) if i.credential else None
+            s.add(Identity(target_id=target_id, label=i.label, role=i.role,
+                           user_id=i.user_id, credential_encrypted=enc))
+    return {"status": "ok", "count": len(identities)}
+
+
+@router.post("/{target_id}/verify", response_model=VerifyResponse)
 async def verify_identities(target_id: int):
-    # Lookup target base url
-    db = get_db()
-    base_url = "http://localhost:4000"
-    if db and db.is_connected():
-        t = await db.target.find_unique(where={"id": target_id})
-        if t:
-            base_url = t.baseUrl
-    elif target_id in in_memory_targets:
-        base_url = in_memory_targets[target_id]["base_url"]
-
-    # Test each identity by requesting /users/me or /health
-    results = []
-    all_ok = True
-
-    async with httpx.AsyncClient(timeout=5.0) as client:
-        # Predefined sandbox tokens if in memory
-        test_accounts = [
-            ("anonymous", {}),
-            ("userA", {"Authorization": "Bearer token-alice-12345"}),
-            ("userB", {"Authorization": "Bearer token-bob-67890"}),
-            ("admin", {"Authorization": "Bearer token-admin-99999"})
+    with get_session() as s:
+        target = s.get(Target, target_id)
+        if not target:
+            raise HTTPException(status_code=404, detail="Target not found")
+        target_base_url = target.base_url
+        ident_rows = s.exec(select(Identity).where(Identity.target_id == target_id)).all()
+        # Extract fields to avoid detached instance errors outside session
+        identities_data = [
+            (r.label, r.role, r.user_id, r.credential_encrypted)
+            for r in ident_rows
         ]
+        
+        spec = s.exec(select(Spec).where(Spec.target_id == target_id)
+                      .order_by(Spec.id.desc())).first()
+        endpoints = s.exec(select(Endpoint).where(Endpoint.spec_id == spec.id)).all() if spec else []
 
-        for label, headers in test_accounts:
-            try:
-                check_path = "/health" if label == "anonymous" else "/users/me"
-                res = await client.get(f"{base_url}{check_path}", headers=headers)
-                ok = (res.status_code == 200)
-                if not ok:
-                    all_ok = False
-                results.append(IdentityVerificationResult(
-                    identity=label,
-                    ok=ok,
-                    status_code=res.status_code,
-                    message="Credentials verified successfully" if ok else f"Unexpected response HTTP {res.status_code}"
-                ))
-            except Exception as e:
-                all_ok = False
-                results.append(IdentityVerificationResult(
-                    identity=label,
-                    ok=False,
-                    status_code=None,
-                    message=f"Connection error: {str(e)}"
-                ))
+        # choose a protected, non-object GET endpoint to probe (e.g. /users/me)
+        probe_ep = next((e for e in endpoints if e.method == "GET" and e.spec_secured
+                         and not e.object_bearing), None)
+        probe_path = probe_ep.path if probe_ep else "/health"
 
-    return VerifyIdentitiesResponse(
-        target_id=target_id,
-        all_ok=all_ok,
-        results=results
-    )
+    guard = SafetyGuard(target_base_url)
+    executor = HttpExecutor(guard)
+    results: List[VerifyResultItem] = []
+    try:
+        for label, role, user_id, cred_enc in identities_data:
+            cred = None
+            if cred_enc:
+                try:
+                    cred = vault.decrypt(cred_enc)
+                except Exception:
+                    cred = None
+            ident = IdentitySession(label, role, user_id, cred)
+            res = await executor.execute("GET", f"{target_base_url}{probe_path}",
+                                         headers=ident.get_auth_headers())
+            if role == "anonymous":
+                ok = res.status != 0  # reachable is enough for anon
+            else:
+                ok = res.ok
+            results.append(VerifyResultItem(identity=label, ok=ok, status=res.status))
+    finally:
+        await executor.close()
+    return VerifyResponse(results=results)

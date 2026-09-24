@@ -1,83 +1,101 @@
-import logging
-from typing import Dict, Any, List
-from .provider import AIProvider
-from .null_provider import NullProvider
-from ..config import settings
+"""Groq provider via LangChain. Falls back to NullProvider text on any error, so
+the AI layer can never break a scan or a page.
 
-logger = logging.getLogger("sentinel.ai.groq")
+Hard boundaries (enforced by construction):
+  * the model receives only sanitized finding/spec metadata — never tokens,
+    passwords, cookies, response bodies, or customer data
+  * the model cannot create a finding, change severity/confidence, or add a target
+"""
+from __future__ import annotations
+
+import logging
+from typing import Any, Dict, List
+
+from ..config import settings
+from .null_provider import NullProvider
+from .provider import AIProvider
+
+logger = logging.getLogger("sentinel.ai")
+
 
 class GroqProvider(AIProvider):
-    def __init__(self):
-        self.fallback = NullProvider()
-        self.reasoning_llm = None
-        self.fast_llm = None
+    name = "groq"
 
+    def __init__(self):
+        self._fallback = NullProvider()
+        self._reasoning = None
+        self._fast = None
         if settings.GROQ_API_KEY:
             try:
                 from langchain_groq import ChatGroq
-                self.reasoning_llm = ChatGroq(
-                    api_key=settings.GROQ_API_KEY,
-                    model=settings.GROQ_REASONING_MODEL,
-                    temperature=0.1
-                )
-                self.fast_llm = ChatGroq(
-                    api_key=settings.GROQ_API_KEY,
-                    model=settings.GROQ_FAST_MODEL,
-                    temperature=0.1
-                )
-            except Exception as e:
-                logger.warning(f"Could not initialize Groq Chat client: {e}. Falling back to NullProvider.")
+                self._reasoning = ChatGroq(model=settings.GROQ_REASONING_MODEL,
+                                           temperature=0, api_key=settings.GROQ_API_KEY)
+                self._fast = ChatGroq(model=settings.GROQ_FAST_MODEL,
+                                      temperature=0, api_key=settings.GROQ_API_KEY)
+                logger.info("Groq provider ready (%s / %s).",
+                            settings.GROQ_REASONING_MODEL, settings.GROQ_FAST_MODEL)
+            except Exception as exc:  # pragma: no cover
+                logger.warning("Groq init failed (%s); using template fallback.", exc)
 
-    async def explain(self, finding_data: Dict[str, Any]) -> str:
-        """
-        Uses Llama 3.3 70B via Groq to generate forensic impact analysis and framework-specific remediation.
-        Crucial: Prompt only contains sanitized metadata, NO raw customer tokens or customer data!
-        """
-        if not self.reasoning_llm:
-            return await self.fallback.explain(finding_data)
+    @property
+    def available(self) -> bool:
+        return self._reasoning is not None
 
-        prompt = f"""You are a principal cybersecurity engineer reviewing an automated Zero-Trust API audit finding.
-Analyze this confirmed security vulnerability and provide:
-1. Executive Impact Summary (1-2 sentences on business risk).
-2. Root Cause Analysis (why this happens in API implementations).
-3. Concrete Code Remediation (provide code snippets for FastAPI / Python and Express.js).
-
-Vulnerability Context:
-- Finding Class: {finding_data.get('class')} (OWASP {finding_data.get('owasp_id')})
-- Endpoint: {finding_data.get('endpoint_method')} {finding_data.get('endpoint_path')}
-- Expected Behavior: {finding_data.get('expected')}
-- Actual Behavior: {finding_data.get('actual')}
-- Confidence: {finding_data.get('confidence')}
-
-Format your response in clean Markdown with headers and syntax-highlighted code blocks."""
-
+    async def explain(self, finding: Dict[str, Any]) -> str:
+        if not self.available:
+            return await self._fallback.explain(finding)
         try:
-            res = await self.reasoning_llm.ainvoke(prompt)
-            return res.content
-        except Exception as e:
-            logger.error(f"Groq reasoning error: {e}. Using fallback template.")
-            return await self.fallback.explain(finding_data)
+            from langchain_core.prompts import ChatPromptTemplate
+            from langchain_core.output_parsers import StrOutputParser
+            prompt = ChatPromptTemplate.from_messages([
+                ("system", "You are an application-security expert. Given verified vulnerability "
+                           "evidence, explain the business impact in plain English and give concise, "
+                           "correct remediation with framework-specific code for FastAPI, Django and "
+                           "Express. Be precise; do not invent details beyond the evidence. Output markdown."),
+                ("human", "Finding class: {finding_class}\nOWASP: {owasp_id}\nEndpoint: {endpoint}\n"
+                          "Severity: {severity}\nExpected: {expected}\nActual: {actual}\n"
+                          "Impact: {impact}\n\nExplain the impact and provide the three fixes."),
+            ])
+            chain = prompt | self._reasoning | StrOutputParser()
+            return await chain.ainvoke({
+                "finding_class": finding.get("finding_class") or finding.get("class", ""),
+                "owasp_id": finding.get("owasp_id", ""),
+                "endpoint": finding.get("endpoint", ""),
+                "severity": finding.get("severity", ""),
+                "expected": finding.get("expected", ""),
+                "actual": finding.get("actual", ""),
+                "impact": finding.get("impact", ""),
+            })
+        except Exception as exc:  # pragma: no cover
+            logger.warning("Groq explain failed (%s); falling back.", exc)
+            return await self._fallback.explain(finding)
 
-    async def summarize(self, scan_summary_data: Dict[str, Any]) -> str:
-        if not self.fast_llm:
-            return await self.fallback.summarize(scan_summary_data)
-
-        prompt = f"""You are an API security auditor. Generate a professional, concise executive summary (1 paragraph) 
-for an executive security report summarizing these automated scan metrics:
-- Total Endpoints Audited: {scan_summary_data.get('total_endpoints', 0)}
-- Total Requests Sent: {scan_summary_data.get('total_requests', 0)}
-- Findings Breakdown: {scan_summary_data.get('findings_by_severity', {})}
-- Overall Risk Score: {scan_summary_data.get('risk_score', 0)} / 100
-
-State clearly the posture of the target API and the priority actions needed."""
-
+    async def summarize(self, scan: Dict[str, Any]) -> str:
+        if not self.available:
+            return await self._fallback.summarize(scan)
         try:
-            res = await self.fast_llm.ainvoke(prompt)
-            return res.content
-        except Exception as e:
-            logger.error(f"Groq summary error: {e}. Using fallback.")
-            return await self.fallback.summarize(scan_summary_data)
+            from langchain_core.prompts import ChatPromptTemplate
+            from langchain_core.output_parsers import StrOutputParser
+            prompt = ChatPromptTemplate.from_messages([
+                ("system", "You are a security lead writing a 4-6 sentence executive summary of an API "
+                           "scan for a mixed technical/non-technical audience. Rank by risk. No fluff."),
+                ("human", "Endpoints: {total_endpoints}\nRequests: {total_requests}\n"
+                          "Findings by severity: {findings_by_severity}\n"
+                          "Findings by class: {findings_by_class}\nRisk score: {risk_score}"),
+            ])
+            chain = prompt | self._reasoning | StrOutputParser()
+            return await chain.ainvoke({
+                "total_endpoints": scan.get("total_endpoints", 0),
+                "total_requests": scan.get("total_requests", 0),
+                "findings_by_severity": scan.get("findings_by_severity", {}),
+                "findings_by_class": scan.get("findings_by_class", {}),
+                "risk_score": scan.get("risk_score", 0),
+            })
+        except Exception as exc:  # pragma: no cover
+            logger.warning("Groq summarize failed (%s); falling back.", exc)
+            return await self._fallback.summarize(scan)
 
-    async def generate_hypotheses(self, spec_endpoints: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        # Sanitized endpoint metadata -> hypotheses
+    async def generate_hypotheses(self, spec_metadata: Dict[str, Any]) -> List[Dict[str, Any]]:
+        # Bounded, validated hypotheses are a stretch feature; the deterministic
+        # engine already covers the seeded classes, so default to none.
         return []

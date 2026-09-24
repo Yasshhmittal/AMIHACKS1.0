@@ -1,130 +1,98 @@
+"""SentinelAPI CLI — scan from the terminal for CI/CD gating.
+
+    sentinel scan --spec api.yaml --target http://localhost:4000 --fail-on high --out result.json
+
+Exit codes:
+    0  clean (no findings at/above threshold)
+    1  findings >= threshold
+    2  config / target error
+    3  budget or deadline exhausted
+"""
+from __future__ import annotations
+
 import asyncio
 import json
 import sys
+from pathlib import Path
+from typing import Optional
+
 import typer
 from rich.console import Console
 from rich.table import Table
 
-app = typer.Typer(help="SentinelAPI — Zero-Trust Automated API Security Scanner")
+# allow running as `python cli/sentinel.py`
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from engine.core.guard import BudgetExhausted, GuardViolation  # noqa: E402
+from engine.core.session import IdentitySession  # noqa: E402
+from engine.core.sweep import AccessMatrixSweep  # noqa: E402
+from engine.ingest.openapi_parser import parse_openapi_spec  # noqa: E402
+
+app = typer.Typer(add_completion=False, help="SentinelAPI — Zero-Trust API vulnerability scanner")
 console = Console()
 
-SEVERITY_ORDER = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1, "INFO": 0}
+SEV_RANK = {"INFO": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
+
+DEFAULT_IDENTITIES = {
+    "anonymous": IdentitySession("anonymous", "anonymous"),
+    "userA": IdentitySession("userA", "user", "1", "token-alice-12345"),
+    "userB": IdentitySession("userB", "user", "2", "token-bob-67890"),
+    "admin": IdentitySession("admin", "admin", "9", "token-admin-99999"),
+}
+
+
+async def _run(spec_path: str, target: str) -> dict:
+    endpoints, _ = parse_openapi_spec(Path(spec_path).read_text())
+    sweep = AccessMatrixSweep(target, endpoints, DEFAULT_IDENTITIES)
+    return await sweep.run()
+
 
 @app.command()
-def scan(
-    spec: str = typer.Option(..., "--spec", "-s", help="Path to OpenAPI 3.x spec (JSON or YAML)"),
-    target: str = typer.Option("http://localhost:4000", "--target", "-t", help="Target API base URL"),
-    fail_on: str = typer.Option("HIGH", "--fail-on", "-f", help="Fail with non-zero exit code on severity (CRITICAL, HIGH, MEDIUM, LOW)"),
-    out: str = typer.Option("scan-result.json", "--out", "-o", help="Output JSON results file")
-):
-    """
-    Executes a zero-trust authorization audit across all spec endpoints.
-    """
-    console.print(f"[bold cyan]SentinelAPI[/bold cyan] initiating Zero-Trust sweep on target [bold]{target}[/bold]...")
-
-    # Load and parse spec
+def scan(spec: str = typer.Option(..., help="OpenAPI spec (json/yaml)"),
+         target: str = typer.Option(..., help="Target base URL"),
+         fail_on: str = typer.Option("high", "--fail-on", help="critical|high|medium|low|info"),
+         out: Optional[str] = typer.Option(None, help="Write JSON result to this path")):
+    threshold = SEV_RANK.get(fail_on.upper(), 3)
     try:
-        from engine.ingest.openapi_parser import parse_openapi_spec
-        with open(spec, "r", encoding="utf-8") as f:
-            raw = f.read()
-        _, endpoints = parse_openapi_spec(raw)
-        console.print(f"Parsed [green]{len(endpoints)}[/green] endpoints from specification.")
-    except Exception as e:
-        console.print(f"[bold red]Configuration/Spec Error:[/bold red] {e}")
-        sys.exit(2)
-
-    # Setup identities
-    from engine.core.session import IdentitySession
-    identities = {
-        "anonymous": IdentitySession("anonymous", "anonymous"),
-        "userA": IdentitySession("userA", "user", user_id="1", raw_credential="token-alice-12345"),
-        "userB": IdentitySession("userB", "user", user_id="2", raw_credential="token-bob-67890"),
-        "admin": IdentitySession("admin", "admin", user_id="9", raw_credential="token-admin-99999")
-    }
-
-    # Execute sweep
-    from engine.core.sweep import AccessMatrixSweep
-    from engine.core.guard import GuardViolation
-
-    sweep = AccessMatrixSweep(target, endpoints, identities)
-    try:
-        results = asyncio.run(sweep.run())
+        result = asyncio.run(_run(spec, target))
     except GuardViolation as gv:
-        console.print(f"[bold red]Safety Guard Violation:[/bold red] {gv}")
-        sys.exit(3)
-    except Exception as e:
-        console.print(f"[bold red]Scan Execution Error:[/bold red] {e}")
-        sys.exit(2)
+        console.print(f"[red]Guard violation:[/red] {gv}")
+        raise typer.Exit(code=2)
+    except BudgetExhausted as be:
+        console.print(f"[yellow]Budget/deadline exhausted:[/yellow] {be}")
+        raise typer.Exit(code=3)
+    except FileNotFoundError:
+        console.print(f"[red]Spec not found:[/red] {spec}")
+        raise typer.Exit(code=2)
 
-    findings = results["findings"]
-    table = Table(title="SentinelAPI Audit Findings")
-    table.add_column("Severity", justify="center")
-    table.add_column("Class", style="cyan")
-    table.add_column("Method", justify="center")
-    table.add_column("Endpoint", style="bold")
-    table.add_column("Confidence", justify="center")
-
-    threshold_level = SEVERITY_ORDER.get(fail_on.upper(), 3)
-    breached_threshold = False
-
-    for f in findings:
-        sev_color = "red" if f.severity == "CRITICAL" else "orange3" if f.severity == "HIGH" else "yellow"
-        table.add_row(
-            f"[{sev_color}]{f.severity}[/{sev_color}]",
-            f.finding_class,
-            f.endpoint_method,
-            f.endpoint_path,
-            f.confidence
-        )
-        if SEVERITY_ORDER.get(f.severity.upper(), 0) >= threshold_level:
-            breached_threshold = True
-
+    findings = result["findings"]
+    table = Table(title="SentinelAPI Findings")
+    for col in ("Severity", "Confidence", "Class", "Endpoint"):
+        table.add_column(col)
+    colors = {"CRITICAL": "red", "HIGH": "dark_orange", "MEDIUM": "yellow", "LOW": "blue", "INFO": "grey62"}
+    for f in sorted(findings, key=lambda x: -SEV_RANK.get(x.severity, 0)):
+        table.add_row(f"[{colors.get(f.severity,'white')}]{f.severity}[/]", f.confidence,
+                      f.finding_class, f.endpoint)
     console.print(table)
-    console.print(f"Total Requests: {results['requests_used']} · Scan Duration: {results['duration_ms']}ms · Findings: {len(findings)}")
+    console.print(f"{len(findings)} finding(s) · {result['requests_used']} requests · "
+                  f"{result['duration_ms']}ms · risk {result['risk_score']:.0f}")
 
-    # Write output
-    output_data = {
-        "target": target,
-        "spec": spec,
-        "requests_used": results["requests_used"],
-        "duration_ms": results["duration_ms"],
-        "risk_score": results["risk_score"],
-        "findings": [
-            {
-                "class": f.finding_class,
-                "owasp_id": f.owasp_id,
-                "endpoint": f.endpoint_path,
-                "method": f.endpoint_method,
-                "severity": f.severity,
-                "confidence": f.confidence,
-                "title": f.title,
-                "impact": f.impact,
-                "remediation": f.remediation,
-                "fingerprint": f.fingerprint
-            }
-            for f in findings
-        ]
-    }
+    if out:
+        Path(out).write_text(json.dumps({
+            "target": target, "spec": spec, "requests_used": result["requests_used"],
+            "duration_ms": result["duration_ms"], "risk_score": result["risk_score"],
+            "findings": [{"class": f.finding_class, "owasp_id": f.owasp_id, "endpoint": f.endpoint,
+                          "severity": f.severity, "confidence": f.confidence, "title": f.title,
+                          "impact": f.impact} for f in findings]}, indent=2))
+        console.print(f"[green]Wrote[/green] {out}")
 
-    with open(out, "w", encoding="utf-8") as f:
-        json.dump(output_data, f, indent=2)
-    console.print(f"Results saved to [bold]{out}[/bold]")
+    worst = max((SEV_RANK.get(f.severity, 0) for f in findings), default=-1)
+    if worst >= threshold:
+        console.print(f"[red]FAIL[/red]: findings at or above '{fail_on}' threshold.")
+        raise typer.Exit(code=1)
+    console.print(f"[green]PASS[/green]: no findings at or above '{fail_on}'.")
+    raise typer.Exit(code=0)
 
-    if breached_threshold:
-        console.print(f"[bold red]CI/CD Gate Failed:[/bold red] Findings meet or exceed severity threshold '{fail_on}'")
-        sys.exit(1)
-
-    console.print("[bold green]CI/CD Gate Passed.[/bold green]")
-    sys.exit(0)
-
-@app.command()
-def reproduce(finding_id: str = typer.Option("f1", "--finding", "-f", help="Finding fingerprint or ID")):
-    """
-    Displays reproducible cURL command for an identified vulnerability.
-    """
-    console.print(f"[bold]Reproducing finding {finding_id}:[/bold]")
-    curl_cmd = 'curl -X GET "http://localhost:4000/orders/102" -H "Authorization: Bearer $USER_A_TOKEN"'
-    console.print(f"\n[green]{curl_cmd}[/green]\n")
 
 if __name__ == "__main__":
     app()

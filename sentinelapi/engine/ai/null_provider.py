@@ -1,60 +1,64 @@
-from typing import Dict, Any, List
+"""NullProvider — deterministic template fallback. Every scan produces identical
+findings with this provider; only the prose differs from the Groq path.
+"""
+from __future__ import annotations
+
+from typing import Any, Dict, List
+
 from .provider import AIProvider
 
+FIX_SNIPPETS = {
+    "BOLA": {
+        "FastAPI": ("@app.get('/orders/{order_id}')\n"
+                    "def get_order(order_id: int, user=Depends(current_user)):\n"
+                    "    order = db.get(order_id)\n"
+                    "    if order.owner_id != user.id and user.role != 'admin':\n"
+                    "        raise HTTPException(403)\n"
+                    "    return order"),
+        "Django": ("order = get_object_or_404(Order, pk=order_id)\n"
+                   "if order.owner_id != request.user.id and not request.user.is_staff:\n"
+                   "    return HttpResponseForbidden()"),
+        "Express": ("const order = await Order.findById(req.params.id);\n"
+                    "if (order.ownerId !== req.user.id && req.user.role !== 'admin')\n"
+                    "  return res.status(403).send();"),
+    },
+}
+
+
 class NullProvider(AIProvider):
-    """
-    Deterministic template-driven fallback provider.
-    Ensures SentinelAPI operates seamlessly when offline, without API keys, or when AI is disabled.
-    """
-    async def explain(self, finding_data: Dict[str, Any]) -> str:
-        f_class = finding_data.get("class", "VULNERABILITY")
-        endpoint = finding_data.get("endpoint_path", "")
-        
-        if f_class == "BOLA":
-            return (
-                f"### Analysis: Broken Object Level Authorization on `{endpoint}`\n\n"
-                "**Root Cause:** The endpoint accepts an object identifier directly from client input and "
-                "returns internal data without validating that the authenticated user owns that specific resource.\n\n"
-                "**Remediation (FastAPI / Python):**\n"
-                "```python\n"
-                f"@app.get('{endpoint}')\n"
-                "def get_resource(id: int, current_user = Depends(get_current_user)):\n"
-                "    resource = db.find(id)\n"
-                "    if not resource:\n"
-                "        raise HTTPException(status_code=404, detail='Not found')\n"
-                "    if resource.owner_id != current_user.id and current_user.role != 'admin':\n"
-                "        raise HTTPException(status_code=403, detail='Forbidden')\n"
-                "    return resource\n"
-                "```"
-            )
-        elif f_class == "BFLA":
-            return (
-                f"### Analysis: Broken Function Level Authorization on `{endpoint}`\n\n"
-                "**Root Cause:** Administrative functionality was accessible to low-privilege authenticated accounts.\n\n"
-                "**Remediation:** Enforce role-based access control (RBAC) checks at the route entry point."
-            )
-        elif f_class == "EXCESSIVE_DATA_EXPOSURE":
-            return (
-                f"### Analysis: Excessive Data Exposure on `{endpoint}`\n\n"
-                "**Root Cause:** Database records or sensitive attributes were serialized without projection.\n\n"
-                "**Remediation:** Define a restrictive Pydantic `response_model` or DTO."
-            )
-        else:
-            return (
-                f"### Analysis: {f_class} on `{endpoint}`\n\n"
-                "**Root Cause:** Violation of zero-trust authorization boundary.\n"
-                "**Remediation:** Review endpoint implementation against security specifications."
-            )
+    name = "template"
 
-    async def summarize(self, scan_summary_data: Dict[str, Any]) -> str:
-        total = scan_summary_data.get("total_findings", 0)
-        critical = scan_summary_data.get("critical_count", 0)
-        high = scan_summary_data.get("high_count", 0)
-        return (
-            f"SentinelAPI completed an automated Zero-Trust authorization sweep and discovered {total} security findings "
-            f"({critical} Critical, {high} High). The most severe issues involve object-level authorization bypasses (BOLA) "
-            "and sensitive data exposure. Prioritize remediation of Critical severity items before production deployment."
-        )
+    async def explain(self, finding: Dict[str, Any]) -> str:
+        cls = finding.get("finding_class") or finding.get("class", "")
+        title = finding.get("title", "")
+        impact = finding.get("impact", "")
+        remediation = finding.get("remediation", "")
+        expected = finding.get("expected", "")
+        actual = finding.get("actual", "")
+        snippets = FIX_SNIPPETS.get(cls, {})
+        parts = [
+            f"## {title}", "",
+            f"**What happened.** {impact}", "",
+            f"**Expected:** {expected}", f"**Actual:** {actual}", "",
+            f"**How to fix.** {remediation}", "",
+        ]
+        if snippets:
+            parts.append("**Framework-specific fixes:**")
+            for fw, code in snippets.items():
+                parts += [f"\n*{fw}*", "```", code, "```"]
+        parts.append("\n_Generated from the deterministic finding (no LLM). Add a GROQ_API_KEY to enable AI explanations._")
+        return "\n".join(parts)
 
-    async def generate_hypotheses(self, spec_endpoints: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    async def summarize(self, scan: Dict[str, Any]) -> str:
+        by_sev = scan.get("findings_by_severity", {})
+        n = scan.get("total_findings", 0)
+        ordered = [f"{by_sev.get(s, 0)} {s.lower()}" for s in ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO") if by_sev.get(s)]
+        return (f"SentinelAPI scanned {scan.get('total_endpoints', 0)} endpoints across "
+                f"{scan.get('total_requests', 0)} requests and confirmed {n} finding(s): "
+                f"{', '.join(ordered) or 'none'}. "
+                "Each finding is backed by real HTTP evidence and a reproducible proof-of-concept. "
+                "Prioritise the authorization findings (BOLA/BFLA) first — they expose one customer's "
+                "data to another and are the highest-impact class here.")
+
+    async def generate_hypotheses(self, spec_metadata: Dict[str, Any]) -> List[Dict[str, Any]]:
         return []

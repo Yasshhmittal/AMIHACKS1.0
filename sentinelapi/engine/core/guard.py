@@ -1,93 +1,118 @@
+"""Safety guard: the engine's conscience. Enforced before any socket opens.
+
+Every control here is a demo talking point and a real safeguard:
+  * target allowlist (sandbox / private ranges only, unless explicitly overridden)
+  * request budget + wall-clock deadline
+  * circuit breaker (abort on high error rate or latency blow-up)
+"""
+from __future__ import annotations
+
 import ipaddress
+import socket
 import time
-import urllib.parse
-from typing import List, Optional
+from urllib.parse import urlparse
+
 from ..config import settings
 
+
 class GuardViolation(Exception):
-    """Raised when safety controls or circuit breakers are breached."""
+    """Raised when a request would break a safety rule. Aborts the scan."""
+
+
+class BudgetExhausted(GuardViolation):
     pass
 
+
+class CircuitBreakerTripped(GuardViolation):
+    pass
+
+
+_ALLOWED_HOSTNAMES = {"localhost", "sentinelshop", "sentinel", "127.0.0.1", "::1"}
+
+
+def _host_is_private(host: str) -> bool:
+    if host in _ALLOWED_HOSTNAMES:
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+        return ip.is_private or ip.is_loopback
+    except ValueError:
+        # Not a literal IP — resolve it. Any resolved address must be private.
+        try:
+            infos = socket.getaddrinfo(host, None)
+        except socket.gaierror:
+            return False
+        for info in infos:
+            addr = info[4][0]
+            try:
+                if not (ipaddress.ip_address(addr).is_private or ipaddress.ip_address(addr).is_loopback):
+                    return False
+            except ValueError:
+                return False
+        return True
+
+
 class SafetyGuard:
-    def __init__(self, target_base_url: str, max_requests: int = 500, deadline_seconds: int = 300):
+    def __init__(self, target_base_url: str,
+                 max_requests: int | None = None,
+                 deadline_seconds: int | None = None):
         self.target_base_url = target_base_url
-        self.max_requests = max_requests
-        self.deadline_seconds = deadline_seconds
-        
-        self.start_time = time.time()
+        self.max_requests = max_requests or settings.MAX_REQUESTS
+        self.deadline_seconds = deadline_seconds or settings.SCAN_DEADLINE_SECONDS
+
         self.request_count = 0
         self.error_count = 0
-        self.latencies: List[float] = []
-        self.initial_avg_latency: Optional[float] = None
-        
-        # Validate target host on initialization
-        self.validate_target_host(target_base_url)
+        self.latencies: list[float] = []
+        self.baseline_latency: float | None = None
+        self.started_at = time.perf_counter()
+        self.aborted_reason: str | None = None
 
-    @staticmethod
-    def is_allowlisted_host(host: str) -> bool:
-        """
-        Safety axiom: Never scan arbitrary third-party infrastructure without explicit authorization.
-        Permits localhost, 127.0.0.1, Docker service names, and RFC1918 private subnets.
-        """
-        allowed_names = {"localhost", "127.0.0.1", "sentinelshop", "sentinel", "0.0.0.0", "::1"}
-        if host.lower() in allowed_names:
-            return True
-            
-        try:
-            ip = ipaddress.ip_address(host)
-            if ip.is_loopback or ip.is_private or ip.is_link_local:
-                return True
-        except ValueError:
-            pass
+        self._assert_target_allowed()
 
-        return settings.SENTINEL_ALLOW_PUBLIC == "1"
-
-    def validate_target_host(self, url: str):
-        parsed = urllib.parse.urlparse(url)
-        host = parsed.hostname
-        if not host:
-            raise GuardViolation(f"Invalid target URL: {url} (missing hostname)")
-        if not self.is_allowlisted_host(host):
+    # ---- allowlist ----
+    def _assert_target_allowed(self) -> None:
+        host = urlparse(self.target_base_url).hostname or ""
+        if settings.allow_public:
+            return
+        if not _host_is_private(host):
             raise GuardViolation(
-                f"Target host '{host}' is outside the authorized allowlist. "
-                "SentinelAPI only probes localhost/sandbox targets unless SENTINEL_ALLOW_PUBLIC=1."
+                f"Refusing to scan '{host}': not a sandbox/private target. "
+                f"Set SENTINEL_ALLOW_PUBLIC=1 to override (only with authorization)."
             )
 
-    def before_request(self):
-        """Pre-request checks: budget and deadline."""
+    # ---- budget + deadline ----
+    def check_budget(self) -> None:
         if self.request_count >= self.max_requests:
-            raise GuardViolation(f"Request budget exhausted: {self.request_count}/{self.max_requests} requests executed.")
-            
-        elapsed = time.time() - self.start_time
-        if elapsed > self.deadline_seconds:
-            raise GuardViolation(f"Scan wall-clock deadline exceeded ({elapsed:.1f}s > {self.deadline_seconds}s).")
+            self.aborted_reason = "budget_exhausted"
+            raise BudgetExhausted(f"Request budget of {self.max_requests} exhausted.")
+        if time.perf_counter() - self.started_at > self.deadline_seconds:
+            self.aborted_reason = "deadline_exceeded"
+            raise BudgetExhausted(f"Scan deadline of {self.deadline_seconds}s exceeded.")
 
-    def record_response(self, status_code: int, latency_ms: float):
-        """Post-request telemetry & circuit breaker logic."""
+    def record_request(self, ok: bool, latency_ms: float) -> None:
         self.request_count += 1
         self.latencies.append(latency_ms)
-        
-        # Count 5xx or connection drops as errors
-        if status_code >= 500 or status_code == 0:
+        if not ok:
             self.error_count += 1
+        if self.baseline_latency is None and ok:
+            self.baseline_latency = latency_ms
 
-        # Evaluate Circuit Breaker after at least 10 requests
-        if self.request_count >= 10:
-            # Check 1: Error rate > 30%
-            error_rate = self.error_count / self.request_count
-            if error_rate > settings.CIRCUIT_BREAKER_ERROR_THRESHOLD:
-                raise GuardViolation(
-                    f"Circuit Breaker tripped! Target error rate {error_rate:.1%} exceeds threshold "
-                    f"({settings.CIRCUIT_BREAKER_ERROR_THRESHOLD:.0%}). Aborting scan to protect target system."
+    # ---- circuit breaker ----
+    def check_circuit_breaker(self) -> None:
+        # Only start judging once we have a meaningful sample, so a couple of
+        # early transport blips don't abort a short scan.
+        if self.request_count < 15:
+            return
+        error_rate = self.error_count / max(self.request_count, 1)
+        if error_rate > settings.CIRCUIT_BREAKER_ERROR_THRESHOLD:
+            self.aborted_reason = "circuit_breaker_error_rate"
+            raise CircuitBreakerTripped(
+                f"Error rate {error_rate:.0%} exceeded {settings.CIRCUIT_BREAKER_ERROR_THRESHOLD:.0%}; aborting to protect target."
+            )
+        if self.baseline_latency and self.latencies:
+            recent = sum(self.latencies[-5:]) / len(self.latencies[-5:])
+            if recent > self.baseline_latency * settings.CIRCUIT_BREAKER_LATENCY_MULTIPLIER:
+                self.aborted_reason = "circuit_breaker_latency"
+                raise CircuitBreakerTripped(
+                    f"Latency tripled vs baseline ({recent:.0f}ms vs {self.baseline_latency:.0f}ms); aborting."
                 )
-
-            # Check 2: Latency tripling
-            if len(self.latencies) == 10:
-                self.initial_avg_latency = sum(self.latencies) / 10.0
-            elif self.initial_avg_latency and self.initial_avg_latency > 0:
-                recent_avg = sum(self.latencies[-10:]) / 10.0
-                if recent_avg > (self.initial_avg_latency * settings.CIRCUIT_BREAKER_LATENCY_MULTIPLIER):
-                    raise GuardViolation(
-                        f"Circuit Breaker tripped! Target latency tripled from {self.initial_avg_latency:.1f}ms "
-                        f"to {recent_avg:.1f}ms. Target server may be saturating."
-                    )

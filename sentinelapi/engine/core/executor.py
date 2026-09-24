@@ -1,90 +1,76 @@
-import asyncio
-import time
-import httpx
-from typing import Any, Dict, Optional
-from ..config import settings
-from .guard import SafetyGuard, GuardViolation
+"""Async HTTP executor. Bounded concurrency, timeouts, redirects OFF.
 
+Every request is routed through the SafetyGuard so budget, deadline and the
+circuit breaker apply uniformly.
+"""
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass, field
+from typing import Any, Dict, Optional
+
+import httpx
+
+from ..config import settings
+from .guard import SafetyGuard
+
+
+@dataclass
 class ExecutionResult:
-    def __init__(self, status: int, headers: Dict[str, str], body: Any, latency_ms: float, error: Optional[str] = None):
-        self.status = status
-        self.headers = headers
-        self.body = body
-        self.latency_ms = latency_ms
-        self.error = error
+    status: int
+    headers: Dict[str, str]
+    body: Any
+    latency_ms: float
+    error: Optional[str] = None
 
     @property
     def ok(self) -> bool:
         return 200 <= self.status < 300
 
+
 class HttpExecutor:
-    def __init__(self, guard: SafetyGuard, max_concurrency: int = 5):
+    def __init__(self, guard: SafetyGuard, concurrency: int | None = None):
         self.guard = guard
-        self.semaphore = asyncio.Semaphore(max_concurrency)
-        self.client = httpx.AsyncClient(
+        self._sem_size = concurrency or settings.MAX_CONCURRENT
+        self._client = httpx.AsyncClient(
             follow_redirects=False,
             timeout=settings.REQUEST_TIMEOUT_SECONDS,
-            verify=False
         )
+        import asyncio
+        self._sem = asyncio.Semaphore(self._sem_size)
 
-    async def close(self):
-        await self.client.aclose()
-
-    async def execute(
-        self,
-        method: str,
-        url: str,
-        headers: Optional[Dict[str, str]] = None,
-        json_body: Optional[Any] = None
-    ) -> ExecutionResult:
-        """
-        Executes a guarded, concurrency-bounded HTTP request.
-        """
-        self.guard.before_request()
-
-        merged_headers = headers.copy() if headers else {}
-        if "User-Agent" not in merged_headers:
-            merged_headers["User-Agent"] = "SentinelAPI-ZeroTrustScanner/1.0"
-
-        async with self.semaphore:
+    async def execute(self, method: str, url: str,
+                      headers: Optional[Dict[str, str]] = None,
+                      json_body: Optional[Any] = None) -> ExecutionResult:
+        self.guard.check_budget()
+        async with self._sem:
             start = time.perf_counter()
-            status_code = 0
-            res_headers = {}
-            body_data = None
-            error_msg = None
-
             try:
-                res = await self.client.request(
-                    method=method.upper(),
-                    url=url,
-                    headers=merged_headers,
-                    json=json_body
-                )
-                latency = (time.perf_counter() - start) * 1000.0
-                status_code = res.status_code
-                res_headers = dict(res.headers)
-
+                resp = await self._client.request(method.upper(), url,
+                                                  headers=headers or {}, json=json_body)
+                latency = (time.perf_counter() - start) * 1000
                 try:
-                    body_data = res.json()
+                    body = resp.json()
                 except Exception:
-                    body_data = res.text
+                    body = resp.text
+                result = ExecutionResult(
+                    status=resp.status_code,
+                    headers={k: v for k, v in resp.headers.items()},
+                    body=body,
+                    latency_ms=latency,
+                )
+            except (httpx.TimeoutException, httpx.RequestError) as exc:
+                latency = (time.perf_counter() - start) * 1000
+                result = ExecutionResult(status=0, headers={}, body=None,
+                                         latency_ms=latency, error=str(exc))
 
-            except httpx.TimeoutException:
-                latency = (time.perf_counter() - start) * 1000.0
-                error_msg = "Request timed out"
-            except httpx.ConnectError:
-                latency = (time.perf_counter() - start) * 1000.0
-                error_msg = "Connection failed / refused"
-            except Exception as e:
-                latency = (time.perf_counter() - start) * 1000.0
-                error_msg = str(e)
+        # The circuit breaker protects the TARGET from a failing scan. A 4xx
+        # (e.g. 401/403 auth denial) is a valid, healthy response — only a
+        # transport failure or a 5xx counts as the target being in trouble.
+        healthy = result.status != 0 and result.status < 500
+        self.guard.record_request(healthy, result.latency_ms)
+        self.guard.check_circuit_breaker()
+        return result
 
-            self.guard.record_response(status_code, latency)
-
-            return ExecutionResult(
-                status=status_code,
-                headers=res_headers,
-                body=body_data,
-                latency_ms=latency,
-                error=error_msg
-            )
+    async def close(self) -> None:
+        await self._client.aclose()

@@ -1,60 +1,50 @@
-from fastapi import APIRouter, HTTPException
+"""Sandbox control: toggle a fix, reset. These proxy SentinelShop's control-plane
+routes so the UI never has to know the target's internals."""
+from __future__ import annotations
+
 import httpx
-from pydantic import BaseModel
-from typing import Dict, Any
+from fastapi import APIRouter, HTTPException
+from sqlmodel import select
+
+from ..db import get_session
+from ..models.schemas import FixToggleRequest, SimpleStatus
+from ..models.tables import Scan, Target
+from ..runtime import target_base_url
 
 router = APIRouter(prefix="/api/demo", tags=["demo"])
 
-class FixToggleRequest(BaseModel):
-    enabled: bool
+# maps scanner vuln_id -> SentinelShop fix flag
+from sentinelshop.fixes import VULN_TO_FIX  # type: ignore
 
-VULN_KEY_MAP = {
-    "bola_orders": "FIX_BOLA_ORDERS",
-    "bola_users": "FIX_BOLA_USERS",
-    "bfla_admin": "FIX_BFLA_ADMIN",
-    "exposure_me": "FIX_EXPOSURE_ME",
-    "auth_invoices": "FIX_AUTH_INVOICES",
-    "ratelimit": "FIX_RATELIMIT",
-    "misconfig": "FIX_MISCONFIG",
-    "1": "FIX_BOLA_ORDERS",
-    "2": "FIX_EXPOSURE_ME",
-    "3": "FIX_BFLA_ADMIN",
-    "4": "FIX_AUTH_INVOICES"
-}
 
-@router.post("/fix/{vuln_id}")
-async def toggle_fix(vuln_id: str, payload: FixToggleRequest):
-    fix_key = VULN_KEY_MAP.get(vuln_id.lower(), vuln_id.upper())
-    
-    async with httpx.AsyncClient(timeout=5.0) as client:
+def _latest_sandbox_base() -> str:
+    with get_session() as s:
+        t = s.exec(select(Target).order_by(Target.id.desc())).first()
+        return t.base_url if t else "http://sentinelshop:4000"
+
+
+@router.post("/fix/{vuln_id}", response_model=SimpleStatus)
+async def apply_fix(vuln_id: str, body: FixToggleRequest = FixToggleRequest()):
+    flag = VULN_TO_FIX.get(vuln_id.upper())
+    if not flag:
+        raise HTTPException(status_code=400, detail=f"Unknown vuln id: {vuln_id}")
+    base = _latest_sandbox_base()
+    async with httpx.AsyncClient(timeout=10) as client:
         try:
-            res = await client.post("http://localhost:4000/__fixes", json={"fixes": {fix_key: payload.enabled}})
-            return res.json()
-        except Exception as e:
-            # Fallback to local import if running together
-            from sentinelshop.fixes import set_fix, get_fixes
-            set_fix(fix_key, payload.enabled)
-            return {"status": "updated_local", "current_fixes": get_fixes()}
+            r = await client.post(f"{base}/__fixes", json={"fixes": {flag: body.enabled}})
+            r.raise_for_status()
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"Could not reach sandbox: {exc}")
+    return SimpleStatus(status="ok", detail=f"{flag} set to {body.enabled}")
 
-@router.get("/fixes")
-async def get_sandbox_fixes():
-    async with httpx.AsyncClient(timeout=5.0) as client:
-        try:
-            res = await client.get("http://localhost:4000/__fixes")
-            return res.json()
-        except Exception:
-            from sentinelshop.fixes import get_fixes
-            return get_fixes()
 
-@router.post("/reset")
+@router.post("/reset", response_model=SimpleStatus)
 async def reset_sandbox():
-    async with httpx.AsyncClient(timeout=5.0) as client:
+    base = _latest_sandbox_base()
+    async with httpx.AsyncClient(timeout=10) as client:
         try:
-            res = await client.post("http://localhost:4000/__reset")
-            return res.json()
-        except Exception:
-            from sentinelshop.data import reset_database
-            from sentinelshop.fixes import reset_fixes
-            reset_database()
-            reset_fixes()
-            return {"status": "reset_successful_local"}
+            r = await client.post(f"{base}/__reset")
+            r.raise_for_status()
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"Could not reach sandbox: {exc}")
+    return SimpleStatus(status="ok", detail="Sandbox reset to initial vulnerable state")

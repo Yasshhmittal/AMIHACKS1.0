@@ -1,18 +1,23 @@
+"""Abstract AI provider. The scanner NEVER depends on this to produce a finding —
+AI only explains, summarizes, or proposes (validated) extra tests.
+"""
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
-from typing import Dict, Any, List
+from typing import Any, Dict, List
+
 
 class AIProvider(ABC):
-    @abstractmethod
-    async def explain(self, finding_data: Dict[str, Any]) -> str:
-        """Generates plain-English explanation + remediation code snippets."""
-        pass
+    name: str = "base"
 
     @abstractmethod
-    async def summarize(self, scan_summary_data: Dict[str, Any]) -> str:
-        """Generates executive summary for audit reports."""
-        pass
+    async def explain(self, finding: Dict[str, Any]) -> str:
+        """Evidence bundle -> plain-English impact + framework-specific fix (markdown)."""
 
     @abstractmethod
-    async def generate_hypotheses(self, spec_endpoints: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Generates targeted testing hypotheses based on sanitized endpoint metadata."""
-        pass
+    async def summarize(self, scan: Dict[str, Any]) -> str:
+        """Scan results -> executive summary."""
+
+    @abstractmethod
+    async def generate_hypotheses(self, spec_metadata: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Sanitized spec metadata -> structured hypotheses (never auto-confirmed)."""

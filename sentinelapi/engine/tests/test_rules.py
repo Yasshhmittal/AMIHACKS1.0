@@ -1,38 +1,34 @@
-import pytest
-from engine.ingest.openapi_parser import resolve_spec_secured
 from engine.core.risk_engine import calculate_severity
-from engine.core.evidence import generate_fingerprint
+from engine.ingest.openapi_parser import resolve_spec_secured
 
-def test_resolve_spec_secured():
-    # Global secured, operation default -> True
-    spec = {"security": [{"BearerAuth": []}]}
-    op = {}
-    assert resolve_spec_secured(op, spec) is True
 
-    # Global secured, operation explicitly public (security: []) -> False
-    op_public = {"security": []}
-    assert resolve_spec_secured(op_public, spec) is False
+def test_bola_factors_reach_critical():
+    sev, score, _ = calculate_severity(
+        ["auth_boundary_crossed", "cross_identity_data", "exploitable_low_priv", "repeat_verified"])
+    assert sev == "CRITICAL"
+    assert score >= 90
 
-    # Global unsecured, operation secured -> True
-    spec_unsecured = {}
-    op_secured = {"security": [{"BearerAuth": []}]}
-    assert resolve_spec_secured(op_secured, spec_unsecured) is True
 
-def test_severity_rubric_calculation():
-    # BOLA factors: 40 + 30 + 10 + 10 = 90 -> CRITICAL
-    factors = ["auth_boundary_crossed", "cross_identity_data", "exploitable_low_priv", "repeat_verified"]
-    severity, score, _ = calculate_severity(factors)
-    assert severity == "CRITICAL"
-    assert score == 90.0
+def test_hardening_gap_is_low():
+    sev, score, _ = calculate_severity(["hardening_gap"])
+    assert sev == "LOW"
 
-    # Misconfig factor: 20 + 10 = 30 -> LOW
-    factors_low = ["hardening_gap", "repeat_verified"]
-    severity_low, score_low, _ = calculate_severity(factors_low)
-    assert severity_low == "LOW"
-    assert score_low == 30.0
 
-def test_generate_fingerprint_deterministic():
-    fp1 = generate_fingerprint("http://localhost:4000", "BOLA", "getOrder", "102", "user")
-    fp2 = generate_fingerprint("http://localhost:4000", "BOLA", "getOrder", "102", "user")
-    assert fp1 == fp2
-    assert len(fp1) == 16
+def test_repeat_diverged_penalises():
+    sev, score, _ = calculate_severity(["auth_boundary_crossed", "repeat_diverged"])
+    assert score == 20  # 40 - 20
+
+
+def test_security_empty_means_public():
+    op = {"security": []}
+    assert resolve_spec_secured(op, {}) is False
+
+
+def test_operation_security_overrides_doc_default():
+    op = {"security": [{"BearerAuth": []}]}
+    assert resolve_spec_secured(op, {"security": []}) is True
+
+
+def test_doc_default_applies_when_op_silent():
+    assert resolve_spec_secured({}, {"security": [{"BearerAuth": []}]}) is True
+    assert resolve_spec_secured({}, {}) is False

@@ -1,120 +1,117 @@
 # SentinelAPI — Zero-Trust API Vulnerability Scanner
 
-> **AmiHacks · Track C / Problem Statement 3**  
-> *"AI suggests. The scanner executes. Evidence verifies."*
+> *We upload an API spec. SentinelAPI refuses to trust it, tests every endpoint
+> against every identity, proves one customer can read another's order — shows
+> the exact request and response — explains why it's Critical, tells you how to
+> fix it, and then verifies the fix worked.*
 
----
-
-## Architecture Overview
-
-SentinelAPI is an automated zero-trust security scanner that ingests OpenAPI 3.x specifications, builds an Access Matrix across all endpoints and identity triples `(identity, endpoint, object)`, and proves authorization bypasses (BOLA, BFLA, Broken Auth, Excessive Data Exposure) with reproducible HTTP evidence.
+**AmiHacks · Track C · Problem Statement 3.** The AI explains; the proof is in the HTTP evidence.
 
 ```
-┌────────────────────────────────────────────────────────┐
-│ UI LAYER (React 18 + TS + Vite + Tailwind)             │
-│ Upload · Live Scan (SSE) · Findings · Access Matrix    │
-└───────────────────────┬────────────────────────────────┘
-                        │ REST + SSE
-┌───────────────────────▼────────────────────────────────┐
-│ SENTINEL ENGINE (FastAPI + Python 3.11 + Prisma)       │
-│ • OpenAPI Ingestion & Classification                   │
-│ • Safety Guard & Concurrency-Bounded Executor          │
-│ • Access Matrix Sweep (BOLA, BFLA, Exposure, Auth)     │
-│ • Response Comparator & Transparent Severity Rubric    │
-│ • AI Explainer & Summarizer (Groq / LangChain)         │
-└───────────────────────┬────────────────────────────────┘
-                        │ Probes
-┌───────────────────────▼────────────────────────────────┐
-│ SENTINELSHOP (Demo Sandbox Target with 8 Seeded Flaws) │
-└────────────────────────────────────────────────────────┘
+AI suggests.  The scanner executes.  Evidence verifies.
 ```
 
 ---
 
-## Quickstart (Docker Compose)
+## Why it's different
 
-The easiest way to run the entire backend stack (PostgreSQL + SentinelShop + Sentinel Engine) in one command:
+Existing tools either fuzz endpoints and hope for a crash, or ask an LLM whether
+something *looks* vulnerable. Neither can **prove** an authorization boundary is
+broken. SentinelAPI proves it: for every candidate it runs a control set of real
+HTTP probes — including probes whose only job is to falsify the finding — and
+reads ownership out of the response body. A `200` is never a finding on its own.
 
+### Five zero-trust axioms
+1. **Never trust the spec** — the OpenAPI doc is a claim; spec drift is a finding.
+2. **Never trust the status code** — a `200` is not authorization; ownership is proven from the body.
+3. **Never trust the identity** — every endpoint is probed with every identity (anon, A, B, admin).
+4. **Never trust the model** — AI can only *propose*; only the deterministic engine creates a finding.
+5. **Never trust the operator** — allowlist, budget, circuit breaker and redaction live in the engine.
+
+---
+
+## Stack
+
+| Layer | Choice |
+|---|---|
+| Engine + API | Python 3.11, FastAPI, httpx (async) |
+| Persistence | **SQLite via SQLModel** (zero infrastructure, runs offline) |
+| Spec parsing | prance + openapi-spec-validator (JSON + YAML, `$ref` resolution) |
+| Live updates | SSE with sequence numbers + polling fallback |
+| AI | Groq behind a provider interface + **NullProvider** fallback |
+| CLI / CI | Typer CLI with exit codes + GitHub Action |
+| Packaging | Docker Compose — `sentinel` (engine) + `sentinelshop` (demo target) |
+
+---
+
+## Quick start
+
+### Option A — local (recommended for the demo)
 ```bash
-cd sentinelapi
-
-# Start all services
-docker compose up --build
-```
-
-- **Sentinel Engine API:** `http://localhost:8000`
-- **SentinelShop Sandbox:** `http://localhost:4000`
-- **PostgreSQL Database:** `localhost:5432`
-
----
-
-## Local Development (Without Docker)
-
-### 1. Python Environment
-
-```bash
-cd sentinelapi
 python -m venv venv
-# Windows:
-.\venv\Scripts\activate
-# Linux/macOS:
-source venv/bin/activate
-
+# Windows:  .\venv\Scripts\activate    macOS/Linux:  source venv/bin/activate
 pip install -r requirements.txt
-```
+cp .env.example .env        # optional: add GROQ_API_KEY for live AI
 
-### 2. Database Setup
-
-Ensure PostgreSQL is running locally, then initialize Prisma:
-
-```bash
-prisma generate
-prisma db push
-```
-
-### 3. Run SentinelShop (Demo Target)
-
-In terminal 1:
-```bash
+# terminal 1 — the vulnerable demo target
 uvicorn sentinelshop.app:app --port 4000 --reload
-```
-
-### 4. Run Sentinel Engine
-
-In terminal 2:
-```bash
+# terminal 2 — the scanner engine (creates sentinel.db on first run)
 uvicorn engine.main:app --port 8000 --reload
+# terminal 3 (frontend, owned by the UI teammate)
+cd web && npm install && npm run dev
 ```
 
----
-
-## Running Automated Scans via CLI
-
-SentinelAPI provides a standalone CLI with CI/CD exit codes:
-
+### Option B — Docker Compose (engine + target, offline)
 ```bash
-python -m cli.sentinel scan --spec sentinelshop/openapi.yaml --target http://localhost:4000 --fail-on high --out scan-results.json
+docker compose up --build
+# engine on :8000, sentinelshop on :4000
 ```
 
-- **Exit 0:** Clean (no findings at or above threshold)
-- **Exit 1:** Security gate failed (findings >= threshold detected)
-- **Exit 2:** Configuration or spec error
-- **Exit 3:** Safety guard violation (budget or circuit breaker tripped)
-
----
-
-## Running Unit Tests
-
-Run the test suite verifying pure functions (comparator, rule engine, redaction pipeline):
-
+### One-shot CLI scan (CI gate)
 ```bash
-pytest engine/tests/ -v
+python cli/sentinel.py scan \
+  --spec sentinelshop/openapi.yaml \
+  --target http://localhost:4000 \
+  --fail-on high --out result.json
+# exit 0 clean · 1 findings>=threshold · 2 config error · 3 budget exhausted
 ```
 
 ---
 
-## Frontend Teammate Handoff
+## What it detects (one sweep, six classes)
 
-The frontend specification and API contract are documented in:
-- **Handoff Guide:** `frontend_handoff.md`
-- **Sample Fixture JSON:** `web/src/fixtures/scan-result.sample.json`
+| Class | OWASP 2023 | How it's proven |
+|---|---|---|
+| BOLA (hero) | API1 | 6-probe control set; ownership read from response body; repeat confirmation |
+| Broken Authentication | API2 | spec says secured, anon gets 2xx with data; malformed-token control |
+| Excessive Data Exposure | API3 | undocumented fields + sensitive name/value patterns |
+| BFLA | API5 | low-priv gets 2xx on admin endpoint; admin control 2xx; anon denied |
+| Missing Rate Limiting | API4 | bounded burst of failed logins, no 429 / RateLimit headers |
+| Misconfiguration | API8 | headers, reflected CORS w/ credentials, debug endpoint, version leak |
+
+Every finding carries redacted request/response evidence, a reproducible cURL
+PoC, a transparent severity breakdown, and two-state confidence
+(`VERIFIED` / `POTENTIAL` — no fake percentages).
+
+---
+
+## Safety (each is enforced in the engine, not the UI)
+- Target **allowlist** — localhost / private ranges only, unless `SENTINEL_ALLOW_PUBLIC=1`.
+- "I am authorized to test this target" **attestation**, stored with the scan.
+- **Request budget** + wall-clock deadline; **circuit breaker** (abort on >30% transport errors or tripled latency).
+- Bounded concurrency (max 5); redirects disabled.
+- Credentials encrypted at rest (Fernet), never logged, never in PoCs (placeholders only).
+- The LLM receives only sanitized spec/finding metadata — never tokens, bodies, or customer data.
+
+See `docs/THREAT_MODEL.md` and `docs/ARCHITECTURE.md`.
+
+---
+
+## Demo loop
+`CRITICAL BOLA VERIFIED → Re-verify (still vulnerable) → Apply fix → Re-verify → 403 FIXED`.
+Re-verify **re-executes the real request** against the live sandbox — never cached.
+
+## Tests
+```bash
+pytest engine/tests -q      # comparator, rubric, spec-secured resolution, redaction
+```

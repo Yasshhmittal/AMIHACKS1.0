@@ -1,26 +1,37 @@
-from pydantic import BaseModel, Field
-from typing import Optional, List, Dict, Any
-from datetime import datetime
+"""Pydantic request/response models — the frozen API contract (H03).
 
-# Target schemas
+These are the shapes the frontend TypeScript interfaces mirror 1:1.
+"""
+from __future__ import annotations
+
+from typing import Any, Dict, List, Literal, Optional
+
+from pydantic import BaseModel, Field
+
+# ------------------------------------------------------------------ Targets
+
 class TargetCreate(BaseModel):
     base_url: str
     environment: str = "sandbox"
     attested_by: Optional[str] = None
+
 
 class TargetResponse(BaseModel):
     id: int
     base_url: str
     environment: str
     attested_by: Optional[str] = None
-    attested_at: Optional[datetime] = None
+    attested_at: Optional[str] = None
 
-# Identity schemas
-class IdentityCreate(BaseModel):
-    label: str       # "userA", "userB", "admin", "anonymous"
-    role: str        # "user", "admin", "anonymous"
+
+# ------------------------------------------------------------------ Identities
+
+class IdentityIn(BaseModel):
+    label: str
+    role: str
     user_id: Optional[str] = None
-    credential: Optional[str] = None  # Raw token/password (encrypted before DB storage)
+    credential: Optional[str] = None  # inbound only, never echoed back
+
 
 class IdentityResponse(BaseModel):
     id: int
@@ -29,20 +40,22 @@ class IdentityResponse(BaseModel):
     role: str
     user_id: Optional[str] = None
 
-class IdentityVerificationResult(BaseModel):
+
+class VerifyResultItem(BaseModel):
     identity: str
     ok: bool
-    status_code: Optional[int] = None
-    message: str
+    status: int
 
-class VerifyIdentitiesResponse(BaseModel):
-    target_id: int
-    all_ok: bool
-    results: List[IdentityVerificationResult]
 
-# Spec schemas
-class EndpointSchema(BaseModel):
-    id: Optional[int] = None
+class VerifyResponse(BaseModel):
+    results: List[VerifyResultItem]
+
+
+# ------------------------------------------------------------------ Spec / Endpoints
+
+class EndpointResponse(BaseModel):
+    id: int
+    spec_id: int
     method: str
     path: str
     operation_id: Optional[str] = None
@@ -50,26 +63,24 @@ class EndpointSchema(BaseModel):
     spec_secured: bool = False
     object_bearing: bool = False
     admin_scoped: bool = False
-    params_json: Optional[Any] = None
-    response_fields_json: Optional[Any] = None
+
 
 class SpecUploadResponse(BaseModel):
     spec_id: int
-    target_id: int
     endpoint_count: int
     secured_count: int
     object_bearing_count: int
-    admin_scoped_count: int
-    endpoints: List[EndpointSchema]
+    admin_count: int
+    endpoints: List[EndpointResponse]
 
-# Scan schemas
+
+# ------------------------------------------------------------------ Scans
+
 class ScanCreate(BaseModel):
     target_id: int
     spec_id: int
-    checks: List[str] = [
-        "BOLA", "BFLA", "EXCESSIVE_DATA_EXPOSURE", "BROKEN_AUTH", "RATE_LIMITING", "MISCONFIGURATION"
-    ]
-    max_requests: int = 500
+    checks: List[str] = Field(default_factory=list)
+
 
 class ScanResponse(BaseModel):
     id: int
@@ -80,19 +91,28 @@ class ScanResponse(BaseModel):
     requests_used: int = 0
     duration_ms: Optional[int] = None
     risk_score: Optional[float] = None
-    started_at: Optional[datetime] = None
-    finished_at: Optional[datetime] = None
-    total_findings: Optional[int] = 0
+    started_at: Optional[str] = None
+    finished_at: Optional[str] = None
+    total_findings: int = 0
+    findings_by_severity: Dict[str, int] = Field(default_factory=dict)
 
-# Score factor
+
+class ScanEventModel(BaseModel):
+    seq: int
+    type: str
+    payload: Dict[str, Any]
+
+
+# ------------------------------------------------------------------ Findings
+
 class ScoreFactor(BaseModel):
     description: str
     weight: int
     applied: bool
 
-# Probe
+
 class ProbeModel(BaseModel):
-    id: Optional[int] = None
+    id: int
     label: str
     identity: str
     status: int
@@ -100,58 +120,83 @@ class ProbeModel(BaseModel):
     request_json_redacted: Dict[str, Any]
     response_json_redacted: Dict[str, Any]
 
-# Finding
+
 class FindingResponse(BaseModel):
     id: int
     scan_id: int
     fingerprint: str
-    finding_class: str = Field(alias="class")
+    finding_class: str = Field(serialization_alias="class")
     owasp_id: str
-    severity: str
+    severity: Literal["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
     risk_score: float
-    confidence: str
+    confidence: Literal["VERIFIED", "POTENTIAL"]
     title: str
     impact: Optional[str] = None
     remediation: Optional[str] = None
-    score_factors: List[ScoreFactor] = []
+    score_factors: List[ScoreFactor] = Field(default_factory=list)
     expected: Optional[str] = None
     actual: Optional[str] = None
+    endpoint: Optional[str] = None
+    vuln_id: Optional[str] = None
     state: str = "open"
     ai_explanation_md: Optional[str] = None
     probes: Optional[List[ProbeModel]] = None
 
-    class Config:
-        populate_by_name = True
+    model_config = {"populate_by_name": True}
 
-# Matrix cell
+
 class MatrixCellModel(BaseModel):
-    id: Optional[int] = None
+    id: int
     scan_id: int
-    endpoint_id: int
-    method: Optional[str] = None
-    path: Optional[str] = None
+    endpoint_id: Optional[int] = None
+    method: str
+    path: str
     identity: str
     object_id: Optional[str] = None
     object_owner: Optional[str] = None
     status: int
     duration_ms: Optional[int] = None
     ownership_mismatch: bool = False
-    undocumented_fields: List[str] = []
-    sensitive_fields: List[str] = []
+    undocumented_fields: List[str] = Field(default_factory=list)
+    sensitive_fields: List[str] = Field(default_factory=list)
 
-# PoC & AI
-class FindingPoCResponse(BaseModel):
-    finding_id: int
-    curl: str
-    httpie: Optional[str] = None
-    python_code: Optional[str] = None
 
-class AIExplainResponse(BaseModel):
+# ------------------------------------------------------------------ AI / report / demo
+
+class ExplainResponse(BaseModel):
     finding_id: int
     explanation_md: str
-    source: str  # "groq" or "template_fallback"
+    provider: str
 
-class AISummaryResponse(BaseModel):
+
+class SummaryResponse(BaseModel):
     scan_id: int
-    summary_text: str
-    source: str
+    text: str
+    provider: str
+    total_endpoints: int
+    total_requests: int
+    findings_by_severity: Dict[str, int]
+    findings_by_class: Dict[str, int]
+    risk_score: float
+
+
+class ReverifyResponse(BaseModel):
+    finding_id: int
+    status: Literal["still-vulnerable", "fixed"]
+    detail: str
+
+
+class PoCResponse(BaseModel):
+    finding_id: int
+    curl: str
+    httpie: str
+    python: str
+
+
+class FixToggleRequest(BaseModel):
+    enabled: bool = True
+
+
+class SimpleStatus(BaseModel):
+    status: str
+    detail: Optional[str] = None

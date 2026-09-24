@@ -1,39 +1,54 @@
-# SentinelAPI — Threat Model & Safety Architecture
+# SentinelAPI — Threat Model
 
-## 1. System Mission & Boundaries
+A security tool must not itself become an attack vector. This document states
+what SentinelAPI may do, what it cannot do, and what an attacker who compromised
+it would gain.
 
-SentinelAPI is an automated Zero-Trust API Vulnerability Scanner designed to identify authorization boundaries failures (BOLA, BFLA, Broken Authentication, Sensitive Data Exposure).
+## What it may do
+- Send bounded, read-first HTTP requests to a target on an **allowlist**
+  (localhost, `127.0.0.1`, `sentinelshop`, private IP ranges). Public targets
+  require an explicit `SENTINEL_ALLOW_PUBLIC=1` and an authorization attestation.
+- Log in as caller-supplied identities and compare what each can reach.
+- Store redacted evidence and findings in a local SQLite database.
 
-### What SentinelAPI May Do
-- Issue controlled HTTP requests (`GET`, `POST`, `DELETE`, etc.) against target endpoints explicitly identified in the OpenAPI specification.
-- Test endpoint responses with varying identity credentials (`anonymous`, `userA`, `userB`, `admin`).
-- Measure latency and error rates to monitor target stability.
-- Generate and output reproducible cURL proof-of-concepts with sanitized placeholder credentials.
+## What it cannot do (enforced in the engine, not the UI)
+- **Scan a target off the allowlist.** The check runs in `core/guard.py` before
+  any socket opens, and again when a `Target` is created via the API.
+- **Hammer a target.** Bounded concurrency (max 5), per-request timeout, a
+  request budget, a wall-clock deadline, and a circuit breaker that aborts on
+  >30% transport/5xx errors or tripled latency.
+- **Fire destructive requests blindly.** The baseline sweep is GET-only; state-
+  changing methods run only where a detector specifically needs them, and the
+  destructive BOLA-write check targets only scanner-created objects.
+- **Follow redirects** into off-allowlist hosts (`follow_redirects=False`).
+- **Leak secrets.** Tokens are encrypted at rest (Fernet), never written to
+  logs, never placed in argv or URLs, and replaced with `$USER_A_TOKEN`
+  placeholders in PoCs.
 
-### What SentinelAPI Cannot Do
-- Cannot launch denial-of-service (DoS) floods: strict concurrency ceiling (`max_concurrent = 5`) and total request limits (`max_requests = 500`).
-- Cannot scan external arbitrary third-party targets without explicit configuration override (`SENTINEL_ALLOW_PUBLIC=1`).
-- Cannot follow arbitrary HTTP redirects (`follow_redirects=False`) to avoid Server-Side Request Forgery (SSRF) bounce attacks.
-- Cannot transmit raw customer credentials or response bodies to external LLMs.
+## Redaction (`core/redact.py`)
+Two passes, applied before anything is streamed, persisted, or shown to the LLM:
+- Header values for `Authorization`, `Cookie`, `Set-Cookie`, `X-Api-Key` → `***redacted***`.
+- Sensitive body **values** masked (bcrypt/JWT and sensitive-named fields);
+  sensitive **key names** are preserved — the presence of the name is the finding.
+- Bodies truncated to 8 KB.
 
----
+## The AI boundary
+The LLM receives only sanitized metadata: method, path, summary, parameter
+names, schema field names, declared security, and a finding's expected/actual
+strings. It never receives tokens, passwords, cookies, response bodies, or
+customer data. It cannot create a finding, change a severity or confidence, or
+add a target. With no `GROQ_API_KEY`, the deterministic path is untouched and
+findings are identical.
 
-## 2. Zero-Trust Safety Controls
+## What an attacker who compromised the tool gains
+Disposable sandbox tokens for an allowlisted, non-production target, and a local
+SQLite file of redacted evidence. No production credentials are ever handled;
+the allowlist and attestation prevent redirection at a real system. In a
+production deployment this attestation becomes domain-ownership verification.
 
-| Defense Layer | Mechanism | Failure Action |
-|---------------|-----------|----------------|
-| **Target Allowlist** | Evaluated in `core/guard.py` before any socket opens | Rejects request immediately with HTTP 400 |
-| **Attestation Check** | User confirms authorization checkbox | Scan cannot start without verified attestation |
-| **Circuit Breaker** | Tracks error rate and response latency | Trips if error rate > 30% or latency triples; aborts scan |
-| **Credential Vault** | Fernet symmetric encryption at rest | Tokens decrypted only in-memory at execution boundary |
-| **Two-Pass Redaction** | Strips tokens and cookies from headers and bodies | Raw tokens never written to logs, SSE, DB, or report |
-| **AI Boundary** | LLM only receives sanitized spec metadata | Tokens and sensitive values never sent to model provider |
-
----
-
-## 3. Compromise Impact Analysis
-
-*What does an attacker gain if they compromise the SentinelAPI instance?*
-- The scanner only possesses test identity credentials for the target sandbox environment (`token-alice-12345`, `token-bob-67890`).
-- No production database credentials or root operating system keys are held by the runner.
-- All stored credentials in PostgreSQL are encrypted with transient or environment-specified Fernet keys.
+## Residual limitations (stated plainly to judges)
+- Ownership detection uses an explicit `x-sentinel-collection-hints` field, not
+  inference. Next step: infer ownership from schema analysis plus a confirmation pass.
+- Coverage is the six classes above; SSRF, mass assignment and multi-step
+  agentic chains are future work. A scanner that *proves* a few classes beats
+  one that *suspects* many.

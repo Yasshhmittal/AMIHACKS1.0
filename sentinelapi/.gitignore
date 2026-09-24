@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+venv/
+.venv/
+*.db
+*.db-wal
+*.db-shm
+.env
+web/node_modules/
+web/dist/
+_snapshot.tgz
+_new.tgz

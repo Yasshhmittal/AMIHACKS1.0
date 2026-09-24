@@ -1,185 +1,130 @@
-import json
+"""Response comparator — the false-positive killer.
+
+Core idea: a 200 is never a finding on its own. We prove ownership from the
+response body, and we compare bodies only after canonicalising and pruning
+volatile fields, so transient noise (timestamps, request ids) can't fabricate
+or hide a match.
+"""
+from __future__ import annotations
+
 import re
-from typing import Any, Dict, List, Optional, Set, Tuple
-
-COMMON_OWNER_KEYS = [
-    "userid", "user_id", "ownerid", "owner_id", "accountid", "account_id",
-    "customerid", "customer_id", "creatorid", "creator_id", "authorid", "author_id"
-]
-
-COMMON_VOLATILE_KEYS = [
-    "timestamp", "time", "date", "created_at", "updated_at", "createdat", "updatedat",
-    "requestid", "request_id", "trace_id", "traceid", "nonce", "etag", "expires_in", "duration"
-]
+from typing import Any, Dict, List, Optional, Set
 
 SENSITIVE_NAME_PATTERNS = [
-    re.compile(r"password", re.IGNORECASE),
-    re.compile(r"passwordhash", re.IGNORECASE),
-    re.compile(r".*_hash$", re.IGNORECASE),
-    re.compile(r"salt", re.IGNORECASE),
-    re.compile(r"secret", re.IGNORECASE),
-    re.compile(r"token", re.IGNORECASE),
-    re.compile(r"apikey", re.IGNORECASE),
-    re.compile(r"api_key", re.IGNORECASE),
-    re.compile(r"privatekey", re.IGNORECASE),
-    re.compile(r"private_key", re.IGNORECASE),
-    re.compile(r"ssn", re.IGNORECASE),
-    re.compile(r"aadhaar", re.IGNORECASE),
-    re.compile(r"cardnumber", re.IGNORECASE),
-    re.compile(r"cvv", re.IGNORECASE),
-    re.compile(r"otp", re.IGNORECASE),
-    re.compile(r"internal", re.IGNORECASE),
-    re.compile(r"adminflag", re.IGNORECASE),
-    re.compile(r"refreshtoken", re.IGNORECASE),
-    re.compile(r"sessionid", re.IGNORECASE),
-    re.compile(r"credit_score", re.IGNORECASE),
-    re.compile(r"creditscore", re.IGNORECASE)
+    "password", "passwordhash", "_hash", "salt", "secret", "token", "apikey",
+    "privatekey", "ssn", "aadhaar", "cardnumber", "cvv", "otp", "internal",
+    "adminflag", "refreshtoken", "sessionid", "credit_score", "creditscore",
+    "internalnotes",
 ]
+BCRYPT_RE = re.compile(r"^\$2[aby]\$")
+JWT_RE = re.compile(r"^eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+")
+ENVELOPE_KEYS = ("data", "items", "results", "result")
 
-VALUE_PATTERNS = [
-    (re.compile(r"^\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53}$"), "bcrypt_hash"),
-    (re.compile(r"^eyJ[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+$"), "jwt_token")
-]
 
-def normalize_scalar(val: Any) -> Any:
-    """Converts scalars to normalized string representations when comparing IDs."""
-    if val is None:
-        return None
-    if isinstance(val, bool):
-        return val
-    if isinstance(val, (int, float)):
-        return str(val)
-    if isinstance(val, str):
-        return val.strip().strip("'\"")
-    return val
+def canonicalize(body: Any) -> Any:
+    """Recursively sort dict keys and coerce scalar ints/floats to strings so
+    that 102 and "102" compare equal downstream."""
+    if isinstance(body, dict):
+        return {k: canonicalize(body[k]) for k in sorted(body.keys())}
+    if isinstance(body, list):
+        return [canonicalize(x) for x in body]
+    if isinstance(body, bool):
+        return body
+    if isinstance(body, (int, float)):
+        return str(body)
+    return body
 
-def canonicalize(data: Any) -> Any:
-    """
-    Recursively sorts keys in dictionaries and normalizes scalar values.
-    """
-    if isinstance(data, dict):
-        return {k: canonicalize(v) for k, v in sorted(data.items())}
-    elif isinstance(data, list):
-        return [canonicalize(item) for item in data]
-    return normalize_scalar(data)
 
-def unwrap_envelope(data: Any) -> Any:
-    """Unwraps common single-key API envelopes like {'data': ...} or {'items': ...}."""
-    if isinstance(data, dict):
-        for env_key in ("data", "items", "results", "payload"):
-            if env_key in data and len(data) == 1:
-                return data[env_key]
-    return data
+def unwrap_envelope(body: Any) -> Any:
+    """Pull the payload out of common wrappers like {"data": {...}}."""
+    if isinstance(body, dict):
+        for key in ENVELOPE_KEYS:
+            if key in body and len(body) <= 2:
+                return body[key]
+    return body
 
-def flatten_keys(data: Any, prefix: str = "") -> List[Tuple[str, Any]]:
-    """Flattens a JSON structure into (dot_path, value) pairs."""
-    items = []
-    if isinstance(data, dict):
-        for k, v in data.items():
-            path = f"{prefix}.{k}" if prefix else k
-            items.append((path, v))
-            items.extend(flatten_keys(v, path))
-    elif isinstance(data, list):
-        for idx, elem in enumerate(data):
-            path = f"{prefix}[{idx}]"
-            items.append((path, elem))
-            items.extend(flatten_keys(elem, path))
-    return items
 
-def find_owner_field(body: Any, hint: Optional[str] = None) -> Optional[str]:
-    """
-    Finds the owner identifier in a response body.
-    First checks explicitly provided hint (e.g. 'userId'), then falls back to heuristics.
-    Returns normalized string of the owner ID.
-    """
-    if not isinstance(body, (dict, list)):
-        return None
+def flatten(body: Any, prefix: str = "") -> Dict[str, Any]:
+    """Flatten nested structures to dotted paths, list items as items[]."""
+    out: Dict[str, Any] = {}
+    if isinstance(body, dict):
+        for k, v in body.items():
+            out.update(flatten(v, f"{prefix}.{k}" if prefix else str(k)))
+    elif isinstance(body, list):
+        for item in body:
+            out.update(flatten(item, f"{prefix}[]"))
+    else:
+        out[prefix] = body
+    return out
 
-    unwrapped = unwrap_envelope(body)
-    pairs = flatten_keys(unwrapped)
 
-    # 1. Hint check
-    if hint:
-        hint_lower = hint.lower()
-        for path, val in pairs:
-            if path.split(".")[-1].lower() == hint_lower and val is not None:
-                return str(normalize_scalar(val))
-
-    # 2. Heuristic check
-    for path, val in pairs:
-        leaf = path.split(".")[-1].lower()
-        if leaf in COMMON_OWNER_KEYS and val is not None:
-            return str(normalize_scalar(val))
-
-    return None
-
-def find_sensitive_fields(body: Any) -> List[str]:
-    """
-    Scans response body for field names or values matching sensitive patterns.
-    Returns list of matching field paths.
-    """
-    sensitive_found = []
-    pairs = flatten_keys(body)
-    
-    for path, val in pairs:
-        leaf = path.split(".")[-1]
-        
-        # Check field name
-        if any(pat.search(leaf) for pat in SENSITIVE_NAME_PATTERNS):
-            sensitive_found.append(path)
-            continue
-            
-        # Check value pattern (bcrypt, JWT)
-        if isinstance(val, str):
-            for regex, _ in VALUE_PATTERNS:
-                if regex.match(val):
-                    sensitive_found.append(f"{path} (matches sensitive value)")
-                    break
-
-    return list(set(sensitive_found))
-
-def learn_volatility(body1: Any, body2: Any) -> Set[str]:
-    """
-    Compares two identical consecutive responses and returns set of keys that changed.
-    """
-    volatile = set()
-    pairs1 = dict(flatten_keys(body1))
-    pairs2 = dict(flatten_keys(body2))
-    
-    all_keys = set(pairs1.keys()).union(set(pairs2.keys()))
-    for k in all_keys:
-        v1 = pairs1.get(k)
-        v2 = pairs2.get(k)
-        if v1 != v2:
-            leaf = k.split(".")[-1]
-            volatile.add(leaf)
-            
-    for k in COMMON_VOLATILE_KEYS:
-        volatile.add(k)
-        
+def learn_volatility(resp_a: Any, resp_b: Any) -> Set[str]:
+    """Two identical requests -> any field that differs is volatile."""
+    fa, fb = flatten(canonicalize(resp_a)), flatten(canonicalize(resp_b))
+    volatile: Set[str] = set()
+    for key in set(fa) | set(fb):
+        if fa.get(key) != fb.get(key):
+            volatile.add(key)
     return volatile
 
-def prune_volatile(data: Any, volatile_keys: Set[str]) -> Any:
-    """Removes volatile keys before equivalence comparison."""
-    if isinstance(data, dict):
-        return {
-            k: prune_volatile(v, volatile_keys)
-            for k, v in data.items()
-            if k.lower() not in volatile_keys
-        }
-    elif isinstance(data, list):
-        return [prune_volatile(x, volatile_keys) for x in data]
-    return data
 
-def body_equivalent(body1: Any, body2: Any, volatile_keys: Optional[Set[str]] = None) -> bool:
+def body_equivalent(r1: Any, r2: Any, volatile_fields: Optional[Set[str]] = None) -> bool:
+    f1 = flatten(canonicalize(unwrap_envelope(r1)))
+    f2 = flatten(canonicalize(unwrap_envelope(r2)))
+    if volatile_fields:
+        f1 = {k: v for k, v in f1.items() if k not in volatile_fields}
+        f2 = {k: v for k, v in f2.items() if k not in volatile_fields}
+    return f1 == f2
+
+
+def find_owner_field(body: Any, hint: Optional[str] = None) -> Optional[str]:
+    """Return the owner id (as a string) from a response body.
+
+    Prefers the explicit hint field (from the spec's collection hints); falls
+    back to common owner field names. Returns None when it can't be proven.
     """
-    Determines if two bodies are functionally equivalent after canonicalization
-    and volatile field suppression.
-    """
-    if volatile_keys is None:
-        volatile_keys = set(COMMON_VOLATILE_KEYS)
-        
-    p1 = prune_volatile(canonicalize(body1), volatile_keys)
-    p2 = prune_volatile(canonicalize(body2), volatile_keys)
-    
-    return json.dumps(p1, sort_keys=True) == json.dumps(p2, sort_keys=True)
+    payload = unwrap_envelope(body)
+    if isinstance(payload, list):
+        payload = payload[0] if payload else {}
+    if not isinstance(payload, dict):
+        return None
+    candidates = []
+    if hint:
+        candidates.append(hint)
+    candidates += ["userId", "user_id", "ownerId", "owner_id", "owner", "accountId", "account_id"]
+    lowered = {k.lower(): k for k in payload.keys()}
+    for cand in candidates:
+        real = lowered.get(cand.lower())
+        if real is not None and payload[real] is not None:
+            return str(payload[real])
+    return None
+
+
+def _looks_sensitive_value(value: Any) -> bool:
+    if isinstance(value, str):
+        if BCRYPT_RE.match(value) or JWT_RE.match(value):
+            return True
+    return False
+
+
+def find_sensitive_fields(body: Any) -> List[str]:
+    """Return flattened field paths whose NAME or VALUE looks sensitive."""
+    if not isinstance(body, (dict, list)):
+        return []
+    flat = flatten(body)
+    hits: List[str] = []
+    for path, value in flat.items():
+        leaf = path.split(".")[-1].replace("[]", "").lower()
+        name_hit = any(pat in leaf for pat in SENSITIVE_NAME_PATTERNS)
+        if name_hit or _looks_sensitive_value(value):
+            hits.append(path)
+    return sorted(set(hits))
+
+
+def undocumented_fields(body: Any, documented: Set[str]) -> List[str]:
+    """Field paths present in the response but absent from the response schema."""
+    if not isinstance(body, (dict, list)):
+        return []
+    flat_leaves = {p.split(".")[-1].replace("[]", "") for p in flatten(body)}
+    doc = {d.lower() for d in documented}
+    return sorted({leaf for leaf in flat_leaves if leaf.lower() not in doc})

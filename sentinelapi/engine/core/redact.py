@@ -1,85 +1,64 @@
+"""Two-pass redaction. Applied before any request/response is stored, streamed
+or shown to the LLM.
+
+Rule: sensitive HEADER values and sensitive body VALUES are masked, but
+sensitive body KEY NAMES are preserved — the presence of the name is the
+finding.
+"""
+from __future__ import annotations
+
 import copy
-import re
-from typing import Any, Dict, List, Union
+from typing import Any, Dict
 
-SENSITIVE_KEY_PATTERNS = [
-    re.compile(r"password", re.IGNORECASE),
-    re.compile(r"passwd", re.IGNORECASE),
-    re.compile(r"secret", re.IGNORECASE),
-    re.compile(r"token", re.IGNORECASE),
-    re.compile(r"apikey", re.IGNORECASE),
-    re.compile(r"api_key", re.IGNORECASE),
-    re.compile(r"private_key", re.IGNORECASE),
-    re.compile(r"privatekey", re.IGNORECASE),
-    re.compile(r"authorization", re.IGNORECASE),
-    re.compile(r"credit_card", re.IGNORECASE),
-    re.compile(r"cardnumber", re.IGNORECASE),
-    re.compile(r"cvv", re.IGNORECASE),
-    re.compile(r"ssn", re.IGNORECASE),
-    re.compile(r"aadhaar", re.IGNORECASE),
-    re.compile(r"otp", re.IGNORECASE),
-    re.compile(r"salt", re.IGNORECASE),
-    re.compile(r"hash", re.IGNORECASE)
-]
+from .comparator import SENSITIVE_NAME_PATTERNS, _looks_sensitive_value
 
-REDACTED_PLACEHOLDER = "***redacted***"
-MAX_BODY_BYTES = 8192  # 8 KB
+REDACT = "***redacted***"
+SENSITIVE_HEADERS = {"authorization", "cookie", "set-cookie", "x-api-key", "x-auth-token"}
+MAX_BODY_BYTES = 8 * 1024
 
-def is_sensitive_key(key: str) -> bool:
-    return any(p.search(key) for p in SENSITIVE_KEY_PATTERNS)
 
-def redact_headers(headers: Dict[str, Any]) -> Dict[str, str]:
-    """Redacts Authorization, Cookie, API keys in headers."""
-    redacted = {}
-    for k, v in headers.items():
-        if k.lower() in {"authorization", "cookie", "set-cookie", "x-api-key", "x-token"}:
-            redacted[k] = REDACTED_PLACEHOLDER
-        else:
-            redacted[k] = str(v)
-    return redacted
+def redact_headers(headers: Dict[str, str]) -> Dict[str, str]:
+    return {k: (REDACT if k.lower() in SENSITIVE_HEADERS else v) for k, v in (headers or {}).items()}
 
-def redact_body_values(data: Any) -> Any:
-    """
-    Recursively traverse JSON objects/arrays.
-    Preserve key names (because the existence of 'passwordHash' is the finding!),
-    but redact values of sensitive keys.
-    """
-    if isinstance(data, dict):
-        new_dict = {}
-        for k, v in data.items():
-            if is_sensitive_key(k):
-                new_dict[k] = REDACTED_PLACEHOLDER
+
+def _redact_body(body: Any) -> Any:
+    if isinstance(body, dict):
+        out = {}
+        for k, v in body.items():
+            leaf = k.lower()
+            if any(pat in leaf for pat in SENSITIVE_NAME_PATTERNS):
+                out[k] = REDACT  # keep the key, mask the value
             else:
-                new_dict[k] = redact_body_values(v)
-        return new_dict
-    elif isinstance(data, list):
-        return [redact_body_values(item) for item in data]
-    return data
+                out[k] = _redact_body(v)
+        return out
+    if isinstance(body, list):
+        return [_redact_body(x) for x in body]
+    if _looks_sensitive_value(body):
+        return REDACT
+    return body
 
-def truncate_body(data: Any, max_bytes: int = MAX_BODY_BYTES) -> Any:
-    """Ensure body does not exceed max_bytes."""
+
+def _truncate(body: Any) -> Any:
     import json
     try:
-        serialized = json.dumps(data)
-        if len(serialized.encode('utf-8')) > max_bytes:
-            return {"_truncated": True, "preview": serialized[:max_bytes] + "... [TRUNCATED]"}
-    except Exception:
-        pass
-    return data
+        raw = json.dumps(body)
+    except (TypeError, ValueError):
+        return body
+    if len(raw.encode()) > MAX_BODY_BYTES:
+        return {"_truncated": True, "_preview": raw[:MAX_BODY_BYTES]}
+    return body
 
-def sanitize_evidence_bundle(bundle: Dict[str, Any]) -> Dict[str, Any]:
-    """Applies complete two-pass redaction to an evidence bundle."""
-    copied = copy.deepcopy(bundle)
-    if "request" in copied:
-        if "headers" in copied["request"]:
-            copied["request"]["headers"] = redact_headers(copied["request"]["headers"])
-        if "body" in copied["request"]:
-            copied["request"]["body"] = truncate_body(redact_body_values(copied["request"]["body"]))
-            
-    if "response" in copied:
-        if "headers" in copied["response"]:
-            copied["response"]["headers"] = redact_headers(copied["response"]["headers"])
-        if "body" in copied["response"]:
-            copied["response"]["body"] = truncate_body(redact_body_values(copied["response"]["body"]))
-            
-    return copied
+
+def redact_body(body: Any) -> Any:
+    return _truncate(_redact_body(copy.deepcopy(body)))
+
+
+def redact_request(method: str, url: str, headers: Dict[str, str], body: Any = None) -> Dict[str, Any]:
+    out = {"method": method, "url": url, "headers": redact_headers(headers)}
+    if body is not None:
+        out["body"] = redact_body(body)
+    return out
+
+
+def redact_response(status: int, headers: Dict[str, str], body: Any) -> Dict[str, Any]:
+    return {"status": status, "headers": redact_headers(headers), "body": redact_body(body)}
