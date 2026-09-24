@@ -1,0 +1,17 @@
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Manrope:wght@400;500;600;800&display=swap');
+@import "tailwindcss";
+@theme {
+  --font-sans: 'Manrope', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+  --color-bg: #0a0a0f; --color-side: #07070b; --color-panel: #101018; --color-line: #23232f;
+  --color-ink: #e7e7ee; --color-dim: #8b8b9c;
+  --color-sev-critical: #dc2626; --color-sev-high: #ea580c; --color-sev-medium: #ca8a04;
+  --color-sev-low: #2563eb; --color-sev-info: #64748b;
+}
+body { background: var(--color-bg); color: var(--color-ink); font-family: var(--font-sans); }
+.card { background: var(--color-panel); border: 1px solid var(--color-line); border-radius: 12px;
+  box-shadow: 0 0 0 1px rgba(255,255,255,.02), 0 8px 40px -20px rgba(255,255,255,.08); }
+:focus-visible { outline: 2px solid #e7e7ee; outline-offset: 2px; }
+@keyframes pulse-dot { 50% { opacity: .35 } }
+.live-dot { animation: pulse-dot 1.6s infinite }
+@media (prefers-reduced-motion: reduce) { .live-dot { animation: none } }
