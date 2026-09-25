@@ -2,7 +2,7 @@
   "rewrites": [
     {
       "source": "/api/(.*)",
-      "destination": "https://your-backend-url-here.com/api/$1"
+      "destination": "https://sentinel-backend-spec.onrender.com/api/$1"
     },
     {
       "source": "/(.*)",
