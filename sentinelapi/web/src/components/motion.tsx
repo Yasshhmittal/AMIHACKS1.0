@@ -1,7 +1,7 @@
-import { motion, useReducedMotion, type Transition } from 'framer-motion'
+import { motion, useReducedMotion } from 'framer-motion'
 import type { ReactNode } from 'react'
 
-const ease: Transition['ease'] = [0.22, 0.7, 0.2, 1]
+const ease: [number, number, number, number] = [0.22, 0.7, 0.2, 1]
 
 export function Reveal({ children, delay = 0, y = 18, className = '' }: { children: ReactNode; delay?: number; y?: number; className?: string }) {
   const reduce = useReducedMotion()

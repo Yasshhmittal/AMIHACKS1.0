@@ -1,12 +1,11 @@
-import { useState } from 'react'
+import type { ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import {
   ArrowRight, ArrowUpRight, Boxes, Eye, Fingerprint, Gauge, KeyRound,
-  Radar, ScanLine, ShieldCheck, Sparkles, Terminal, Check, type LucideIcon,
+  Radar, ScanLine, ShieldCheck, Sparkles, Terminal, type LucideIcon,
 } from 'lucide-react'
-import { LandingNav } from '../components/Nav'
-import { Reveal, Stagger, Item, motion } from '../components/motion'
-import Hero3D from '../three/Hero3D'
+import HeroStory from '../components/HeroStory'
+import { Reveal, Stagger, Item } from '../components/motion'
 
 interface Detector { icon: LucideIcon; name: string; owasp: string; hero?: boolean; desc: string }
 const DETECTORS: Detector[] = [
@@ -18,8 +17,6 @@ const DETECTORS: Detector[] = [
   { icon: Boxes, name: 'Misconfiguration', owasp: 'API8', desc: 'Missing headers, reflected CORS with credentials, exposed debug endpoints, version leaks.' },
 ]
 
-const STORY = ['Understand', 'Test', 'Prove', 'Explain', 'Verify']
-
 const STEPS = [
   { n: '01', t: 'Ingest the spec', d: 'Upload an OpenAPI file. We classify every endpoint — which carry objects, which claim to require auth.' },
   { n: '02', t: 'Sweep every identity', d: 'Anonymous, two users, and an admin probe every endpoint. Authorization is a property of who asks for what.' },
@@ -27,77 +24,34 @@ const STEPS = [
   { n: '04', t: 'Explain & verify', d: 'Plain-English impact, a copy-paste PoC, and a re-verify button that re-runs the real request against your API.' },
 ]
 
-function GrainToggle() {
-  const [grain, setGrain] = useState(true)
-  const toggle = () => { setGrain(g => { document.body.classList.toggle('no-grain', g); return !g }) }
+function TabCard({ index, hero, children }: { index: number; hero: boolean; children: ReactNode }) {
+  const bg = hero ? '#d4f55a' : '#1b2028'
   return (
-    <button onClick={toggle} className="chip inline-flex items-center gap-2 rounded-full bg-cream2 px-3 py-1.5 text-[11px] font-semibold text-ink2 hover:bg-paper">
-      <span className={`grid size-4 place-items-center rounded-full ${grain ? 'bg-ink text-lime' : 'bg-transparent text-muted'}`}>{grain && <Check size={11} />}</span>
-      Grain
-    </button>
+    <div className="group relative h-full pt-8 transition-transform duration-300 hover:-translate-y-1.5">
+      <div className="mono absolute left-0 top-0 flex h-8 w-[68px] items-center rounded-t-[14px] pl-3.5 text-[11px]" style={{ background: bg, color: hero ? '#1d2a05' : '#9aa3ad' }}>/ {String(index + 1).padStart(2, '0')}</div>
+      <span aria-hidden className="absolute left-[68px] top-[10px] size-[22px]" style={{ background: `radial-gradient(circle at 100% 0, transparent 21.5px, ${bg} 22px)` }} />
+      <div className="relative h-full min-h-[280px] rounded-[18px] rounded-tl-none p-6" style={{ background: bg }}>{children}</div>
+    </div>
+  )
+}
+
+function GlossyIcon({ icon: Icon, accent }: { icon: LucideIcon; accent: string }) {
+  return (
+    <div className="relative mt-3 grid size-24 place-items-center transition-transform duration-500 group-hover:-rotate-6 group-hover:scale-105">
+      <div className="absolute inset-0 rounded-[28px]" style={{ background: 'linear-gradient(145deg,#f6f7f9 0%,#cdd2da 45%,#8b93a0 100%)', boxShadow: 'inset 0 2px 6px rgba(255,255,255,.9), inset 0 -8px 16px rgba(40,45,55,.45), 0 20px 34px -14px rgba(0,0,0,.8)' }} />
+      <div className="absolute inset-[19%] rounded-[18px]" style={{ background: `linear-gradient(145deg, ${accent}, color-mix(in srgb, ${accent} 70%, #000))`, boxShadow: 'inset 0 2px 4px rgba(255,255,255,.55), inset 0 -4px 8px rgba(0,0,0,.25)' }} />
+      <Icon size={26} strokeWidth={2.2} className="relative text-[#12151a]" />
+    </div>
   )
 }
 
 export default function Landing() {
   return (
     <div className="relative z-10">
-      <LandingNav />
-
-      {/* ---------------- HERO ---------------- */}
-      <section className="mx-auto max-w-6xl px-4 pt-8">
-        <div className="glass-card relative overflow-hidden p-6 sm:p-10">
-          {/* soft lime glow */}
-          <div className="pointer-events-none absolute -right-24 -top-24 h-80 w-80 rounded-full bg-lime/30 blur-3xl" />
-          <div className="grid items-center gap-8 lg:grid-cols-[1.05fr_.95fr]">
-            <div>
-              <motion.div initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.6 }}
-                className="mb-5 inline-flex items-center gap-2 rounded-full border border-hair bg-paper px-3 py-1.5 text-xs font-medium text-ink2">
-                <span className="live-dot size-1.5 rounded-full bg-lime2" /> Zero-Trust API Vulnerability Scanner
-              </motion.div>
-              <motion.h1 initial={{ opacity: 0, y: 18 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.7, delay: 0.05 }}
-                className="font-display text-[2.6rem] font-bold leading-[1.02] tracking-tight sm:text-6xl">
-                There is a better way<br />to <span className="relative">secure<span className="absolute -bottom-1 left-0 h-3 w-full rounded-full bg-lime/60" /></span> your APIs.
-              </motion.h1>
-              <motion.p initial={{ opacity: 0, y: 18 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.7, delay: 0.12 }}
-                className="mt-5 max-w-lg text-base leading-7 text-ink2">
-                SentinelAPI reads your OpenAPI spec, refuses to trust it, and tests every endpoint against every identity — then <b>proves</b> that one customer can read another’s data with the exact request and response.
-              </motion.p>
-              <motion.div initial={{ opacity: 0, y: 18 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.7, delay: 0.18 }}
-                className="mt-7 flex flex-wrap items-center gap-3">
-                <Link to="/scan/new" className="lime-btn inline-flex items-center gap-2 rounded-full px-6 py-3 text-sm font-semibold hover:brightness-105">
-                  <ScanLine size={17} /> Start a scan
-                </Link>
-                <a href="#how" className="inline-flex items-center gap-2 rounded-full border border-hair bg-paper px-5 py-3 text-sm font-semibold hover:bg-cream2">
-                  See how it works <ArrowRight size={15} />
-                </a>
-                <span className="ml-1 text-xs text-muted">Sandbox-only · authorized targets</span>
-              </motion.div>
-            </div>
-
-            {/* 3D orb */}
-            <div className="relative">
-              <div className="mx-auto aspect-square w-full max-w-[460px]">
-                <Hero3D />
-              </div>
-              <div className="absolute bottom-1 right-1"><GrainToggle /></div>
-            </div>
-          </div>
-
-          {/* five-word story ribbon */}
-          <div className="mt-8 flex flex-wrap items-center gap-x-3 gap-y-2 border-t border-hair pt-6 text-sm">
-            {STORY.map((s, i) => (
-              <span key={s} className="flex items-center gap-3">
-                <span className="font-display font-semibold">{s}</span>
-                {i < STORY.length - 1 && <ArrowRight size={14} className="text-muted" />}
-              </span>
-            ))}
-            <span className="ml-auto text-xs text-muted">The AI explains. The scanner executes. Evidence verifies.</span>
-          </div>
-        </div>
-      </section>
+      <HeroStory />
 
       {/* ---------------- MARQUEE ---------------- */}
-      <section className="mx-auto mt-6 max-w-6xl px-4">
+      <section className="mx-auto mt-10 max-w-6xl px-4">
         <div className="panel overflow-hidden p-6">
           <p className="mb-4 px-1 text-sm text-oncream/70">Built to catch the logic flaws signature scanners miss — across the OWASP API Top 10.</p>
           <div className="relative overflow-hidden [mask-image:linear-gradient(90deg,transparent,#000_8%,#000_92%,transparent)]">
@@ -111,7 +65,7 @@ export default function Landing() {
       </section>
 
       {/* ---------------- PRODUCT (dark, lime accent) ---------------- */}
-      <section id="product" className="mx-auto mt-6 max-w-6xl px-4">
+      <section id="product" className="scroll-mt-28 mx-auto mt-6 max-w-6xl px-4">
         <div className="panel grid gap-6 p-6 sm:p-10 lg:grid-cols-3">
           <Reveal className="lg:col-span-1">
             <p className="mono text-xs text-lime">/ what it does</p>
@@ -136,31 +90,54 @@ export default function Landing() {
         </div>
       </section>
 
-      {/* ---------------- DETECTORS ---------------- */}
-      <section id="detectors" className="mx-auto mt-16 max-w-6xl px-4">
-        <Reveal><div className="flex items-end justify-between">
-          <div><p className="mono text-xs text-muted">/ detectors</p><h2 className="font-display mt-2 text-3xl font-bold tracking-tight sm:text-4xl">One sweep. Six classes of proof.</h2></div>
-          <span className="hidden text-sm text-muted sm:block">All from one request budget</span>
-        </div></Reveal>
-        <Stagger className="mt-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {DETECTORS.map(d => (
-            <Item key={d.name}>
-              <div className={`group relative h-full overflow-hidden rounded-2xl border p-6 transition-transform hover:-translate-y-1 ${d.hero ? 'border-lime2/50' : 'border-hair'}`}
-                style={{ background: d.hero ? 'linear-gradient(180deg,#eef9c8,#f7fadf)' : 'var(--color-paper)' }}>
-                <div className="flex items-center justify-between">
-                  <span className={`grid size-11 place-items-center rounded-xl ${d.hero ? 'bg-ink text-lime' : 'bg-cream2 text-ink'}`}><d.icon size={20} /></span>
-                  <span className="mono text-xs text-muted">{d.owasp}</span>
-                </div>
-                <h3 className="font-display mt-4 flex items-center gap-2 text-lg font-semibold">{d.name}{d.hero && <span className="chip rounded-full bg-ink px-2 py-0.5 text-[10px] font-bold text-lime">HERO</span>}</h3>
-                <p className="mt-1.5 text-sm leading-6 text-ink2">{d.desc}</p>
+      {/* ---------------- DETECTORS (numbered tab cards) ---------------- */}
+      <section id="detectors" className="scroll-mt-28 mx-auto mt-16 max-w-6xl px-4">
+        <div className="panel p-6 sm:p-10">
+          <Reveal>
+            <div className="grid gap-8 lg:grid-cols-[1.15fr_.85fr] lg:items-end">
+              <div>
+                <p className="mono text-xs text-lime">/ detectors</p>
+                <h2 className="font-display mt-4 text-[clamp(2.3rem,4.4vw,3.9rem)] font-normal leading-[1.04] tracking-[-0.035em] text-cream">
+                  Six things SentinelAPI <span className="relative whitespace-nowrap text-lime">proves<svg aria-hidden viewBox="0 0 200 12" className="absolute -bottom-2 left-0 w-full" preserveAspectRatio="none"><path d="M2 8 C 50 2, 150 2, 198 7" stroke="#cdfb47" strokeWidth="3" fill="none" strokeLinecap="round" /></svg></span> —<br className="hidden sm:block" /> not guesses.
+                </h2>
               </div>
-            </Item>
-          ))}
-        </Stagger>
+              <div className="lg:pb-2">
+                <p className="max-w-md text-sm leading-6 text-oncream/65">One Access-Matrix sweep tests every endpoint against every identity and turns each suspicion into evidence — six OWASP API classes from a single request budget.</p>
+                <a href="#how" className="mt-5 inline-flex items-center gap-2 text-sm text-cream transition-colors hover:text-lime"><span className="grid size-5 place-items-center rounded-full bg-cream text-ink"><ArrowRight size={11} /></span>How it works</a>
+              </div>
+            </div>
+          </Reveal>
+          <Stagger className="mt-10 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
+            {DETECTORS.map((d, i) => (
+              <Item key={d.name} className="h-full">
+                <TabCard index={i} hero={!!d.hero}>
+                  {d.hero ? (
+                    <div className="flex h-full flex-col">
+                      <span className="mono text-[11px] text-[#3c4f07]">{d.owasp} · the hero detector</span>
+                      <h3 className="font-display mt-2 text-2xl font-normal text-[#1d2a05]">{d.name}</h3>
+                      <p className="mt-2 text-[14px] leading-6 text-[#1d2a05]">{d.desc}</p>
+                      <p className="mt-2 text-[12.5px] leading-5 text-[#3c4f07]">Six probes run — victim baseline, attack, attacker baseline, anonymous, stub and repeat. Four exist only to prove us wrong.</p>
+                      <Link to="/scan/new" className="mt-auto inline-flex items-center gap-2 pt-5 text-sm font-medium text-[#1d2a05]"><span className="grid size-5 place-items-center rounded-full bg-[#1d2a05] text-lime"><ArrowRight size={11} /></span>Run it</Link>
+                    </div>
+                  ) : (
+                    <div className="flex h-full flex-col items-center justify-between gap-5 text-center">
+                      <GlossyIcon icon={d.icon} accent={i % 2 ? '#ff8a2b' : '#b9e33a'} />
+                      <div>
+                        <h3 className="font-display text-xl font-normal leading-tight text-cream">{d.name}</h3>
+                        <p className="mt-2 text-[12.5px] leading-5 text-oncream/55">{d.desc}</p>
+                        <span className="mono mt-3 inline-block text-[10px] text-oncream/40">{d.owasp}</span>
+                      </div>
+                    </div>
+                  )}
+                </TabCard>
+              </Item>
+            ))}
+          </Stagger>
+        </div>
       </section>
 
       {/* ---------------- HOW IT WORKS ---------------- */}
-      <section id="how" className="mx-auto mt-16 max-w-6xl px-4">
+      <section id="how" className="scroll-mt-28 mx-auto mt-16 max-w-6xl px-4">
         <Reveal><p className="mono text-xs text-muted">/ how it works</p><h2 className="font-display mt-2 text-3xl font-bold tracking-tight sm:text-4xl">Spec in. Proof out.</h2></Reveal>
         <Stagger className="mt-8 grid gap-4 md:grid-cols-2 lg:grid-cols-4">
           {STEPS.map(s => (
@@ -176,7 +153,7 @@ export default function Landing() {
       </section>
 
       {/* ---------------- PROOF ---------------- */}
-      <section id="proof" className="mx-auto mt-16 max-w-6xl px-4">
+      <section id="proof" className="scroll-mt-28 mx-auto mt-16 max-w-6xl px-4">
         <div className="glass-card grid gap-8 overflow-hidden p-6 sm:p-10 lg:grid-cols-2">
           <Reveal>
             <p className="mono text-xs text-muted">/ the proof</p>
