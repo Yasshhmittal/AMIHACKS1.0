@@ -31,6 +31,9 @@ class IdentityIn(BaseModel):
     role: str
     user_id: Optional[str] = None
     credential: Optional[str] = None  # inbound only, never echoed back
+    credential_type: Optional[str] = "bearer"  # "bearer" | "password" | "api_key"
+    login_url: Optional[str] = None  # full login endpoint URL for password-based auth
+    login_body: Optional[Dict[str, Any]] = None  # JSON body for the login request
 
 
 class IdentityResponse(BaseModel):

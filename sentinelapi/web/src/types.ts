@@ -14,6 +14,9 @@ export interface Identity {
   role: string
   user_id?: string
   credential?: string
+  credential_type?: 'bearer' | 'password' | 'api_key'
+  login_url?: string
+  login_body?: Record<string, any>
 }
 
 export interface Endpoint {

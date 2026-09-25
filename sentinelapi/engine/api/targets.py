@@ -88,8 +88,17 @@ async def set_identities(target_id: int, identities: List[IdentityIn]):
         s.exec(delete(Identity).where(Identity.target_id == target_id))
         for i in identities:
             enc = vault.encrypt(i.credential) if i.credential else None
-            s.add(Identity(target_id=target_id, label=i.label, role=i.role,
-                           user_id=i.user_id, credential_encrypted=enc))
+            login_config = {}
+            if i.login_url:
+                login_config["login_url"] = i.login_url
+            if i.login_body:
+                login_config["login_body"] = i.login_body
+            s.add(Identity(
+                target_id=target_id, label=i.label, role=i.role,
+                user_id=i.user_id, credential_encrypted=enc,
+                credential_type=i.credential_type or "bearer",
+                login_config_json=login_config,
+            ))
     return {"status": "ok", "count": len(identities)}
 
 
@@ -103,7 +112,8 @@ async def verify_identities(target_id: int):
         ident_rows = s.exec(select(Identity).where(Identity.target_id == target_id)).all()
         # Extract fields to avoid detached instance errors outside session
         identities_data = [
-            (r.label, r.role, r.user_id, r.credential_encrypted)
+            (r.label, r.role, r.user_id, r.credential_encrypted,
+             r.credential_type, r.login_config_json or {})
             for r in ident_rows
         ]
         
@@ -120,16 +130,67 @@ async def verify_identities(target_id: int):
     executor = HttpExecutor(guard)
     results: List[VerifyResultItem] = []
     try:
-        for label, role, user_id, cred_enc in identities_data:
+        for label, role, user_id, cred_enc, cred_type, login_config in identities_data:
             cred = None
             if cred_enc:
                 try:
                     cred = vault.decrypt(cred_enc)
                 except Exception:
                     cred = None
-            ident = IdentitySession(label, role, user_id, cred)
+
+            auth_headers = {}
+
+            if role == "anonymous" or not cred:
+                # No auth needed
+                pass
+            elif cred_type == "password":
+                # Password-based: perform login to obtain a bearer token
+                login_url = login_config.get("login_url", "")
+                login_body = login_config.get("login_body", {})
+                if login_url and login_body:
+                    try:
+                        login_res = await executor.execute(
+                            "POST", login_url,
+                            headers={"Content-Type": "application/json"},
+                            json_body=login_body,
+                        )
+                        if login_res.ok and isinstance(login_res.body, dict):
+                            # Try common token field names
+                            token = (
+                                login_res.body.get("token")
+                                or login_res.body.get("access_token")
+                                or login_res.body.get("accessToken")
+                                or login_res.body.get("jwt")
+                                or login_res.body.get("id_token")
+                            )
+                            token_type = login_res.body.get("type", "Bearer")
+                            if token:
+                                auth_headers = {"Authorization": f"{token_type} {token}"}
+                            else:
+                                # Token not found in known fields — mark as failed
+                                results.append(VerifyResultItem(identity=label, ok=False, status=0))
+                                continue
+                        else:
+                            # Login request failed
+                            results.append(VerifyResultItem(
+                                identity=label, ok=False,
+                                status=login_res.status))
+                            continue
+                    except Exception:
+                        results.append(VerifyResultItem(identity=label, ok=False, status=0))
+                        continue
+                else:
+                    # Missing login_url or login_body — can't do password auth
+                    results.append(VerifyResultItem(identity=label, ok=False, status=0))
+                    continue
+            elif cred_type == "api_key":
+                auth_headers = {"X-API-Key": cred}
+            else:
+                # Default bearer
+                auth_headers = {"Authorization": f"Bearer {cred}"}
+
             res = await executor.execute("GET", f"{target_base_url}{probe_path}",
-                                         headers=ident.get_auth_headers())
+                                         headers=auth_headers)
             if role == "anonymous":
                 ok = res.status != 0  # reachable is enough for anon
             else:

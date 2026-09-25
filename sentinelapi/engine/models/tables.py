@@ -38,6 +38,8 @@ class Identity(SQLModel, table=True):
     role: str
     user_id: Optional[str] = None
     credential_encrypted: Optional[str] = None  # vault ciphertext, never returned raw
+    credential_type: str = "bearer"  # "bearer" | "password" | "api_key"
+    login_config_json: Any = Field(default_factory=dict, sa_column=Column(SA_JSON))  # {login_url, login_body}
 
 
 class Spec(SQLModel, table=True):

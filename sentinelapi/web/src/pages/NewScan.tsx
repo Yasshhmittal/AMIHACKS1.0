@@ -59,10 +59,11 @@ function PasswordInput({ value, onChange, disabled, placeholder, ariaLabel }: {
 }
 
 /* ── Identity Card ── */
-function IdentityCard({ identity, note, index, verified, onUpdate, onRemove, isCustom }: {
-  identity: Identity; note?: string; index: number; verified: boolean | null; onUpdate: (k: 'label' | 'role' | 'user_id' | 'credential', v: string) => void; onRemove?: () => void; isCustom?: boolean
+function IdentityCard({ identity, note, index, verified, onUpdate, onRemove, isCustom, baseUrl }: {
+  identity: Identity; note?: string; index: number; verified: boolean | null; onUpdate: (k: keyof Identity, v: any) => void; onRemove?: () => void; isCustom?: boolean; baseUrl?: string
 }) {
   const isAnon = identity.label === 'anonymous'
+  const credType = identity.credential_type || 'bearer'
   const roleColors: Record<string, { bg: string; text: string; border: string }> = {
     anonymous: { bg: 'rgba(107,113,120,0.08)', text: '#6B7178', border: 'rgba(107,113,120,0.2)' },
     user: { bg: 'rgba(72,176,247,0.08)', text: '#48B0F7', border: 'rgba(72,176,247,0.2)' },
@@ -106,17 +107,12 @@ function IdentityCard({ identity, note, index, verified, onUpdate, onRemove, isC
         </div>
       </div>
 
-      {/* Fields */}
-      <div className="grid gap-2 sm:grid-cols-[1fr_auto_2fr]">
+      {/* Row 1: Role + User ID + Credential Type */}
+      <div className="grid gap-2 sm:grid-cols-[1fr_auto_1fr]">
         <div>
           <label className="block text-[10px] font-medium uppercase tracking-wider mb-1" style={{ color: 'var(--color-muted)' }}>Role</label>
-          <select
-            aria-label={`${identity.label} role`}
-            className={`${input} appearance-none cursor-pointer`}
-            value={identity.role}
-            disabled={isAnon}
-            onChange={e => onUpdate('role', e.target.value)}
-          >
+          <select aria-label={`${identity.label} role`} className={`${input} appearance-none cursor-pointer`}
+            value={identity.role} disabled={isAnon} onChange={e => onUpdate('role', e.target.value)}>
             <option value="anonymous">anonymous</option>
             <option value="user">user</option>
             <option value="admin">admin</option>
@@ -129,18 +125,67 @@ function IdentityCard({ identity, note, index, verified, onUpdate, onRemove, isC
           <input aria-label={`${identity.label} id`} className={input} placeholder={isAnon ? '—' : 'e.g. 1, uuid…'} value={identity.user_id || ''} disabled={isAnon} onChange={e => onUpdate('user_id', e.target.value)} />
         </div>
         <div>
-          <label className="block text-[10px] font-medium uppercase tracking-wider mb-1" style={{ color: 'var(--color-muted)' }}>
-            {isAnon ? 'Credential' : 'API Token / Password'}
-          </label>
-          <PasswordInput
-            ariaLabel={`${identity.label} credential`}
-            placeholder={isAnon ? 'No authentication' : 'Bearer token, API key, or password'}
-            value={identity.credential ?? ''}
-            disabled={isAnon}
-            onChange={v => onUpdate('credential', v)}
-          />
+          <label className="block text-[10px] font-medium uppercase tracking-wider mb-1" style={{ color: 'var(--color-muted)' }}>Auth method</label>
+          <select aria-label={`${identity.label} auth type`} className={`${input} appearance-none cursor-pointer`}
+            value={credType} disabled={isAnon}
+            onChange={e => { onUpdate('credential_type', e.target.value); if (e.target.value !== 'password') { onUpdate('login_url', ''); onUpdate('login_body', {}); } }}>
+            <option value="bearer">Bearer Token</option>
+            <option value="password">Password Login</option>
+            <option value="api_key">API Key</option>
+          </select>
         </div>
       </div>
+
+      {/* Row 2: Credential fields — varies by type */}
+      {!isAnon && (
+        <div className="mt-2">
+          {credType === 'bearer' && (
+            <div>
+              <label className="block text-[10px] font-medium uppercase tracking-wider mb-1" style={{ color: 'var(--color-muted)' }}>Bearer token</label>
+              <PasswordInput ariaLabel={`${identity.label} credential`} placeholder="Paste your JWT or access token here" value={identity.credential ?? ''} onChange={v => onUpdate('credential', v)} />
+              <p className="mt-1 text-[10px]" style={{ color: 'var(--color-muted)' }}>Already have a token? Paste it directly.</p>
+            </div>
+          )}
+
+          {credType === 'password' && (
+            <div className="space-y-2 rounded-xl p-3 mt-1" style={{ background: 'color-mix(in srgb, var(--color-sky) 4%, transparent)', border: '1px solid color-mix(in srgb, var(--color-sky) 12%, transparent)' }}>
+              <p className="text-[10px] font-medium" style={{ color: 'var(--color-sky)' }}>The engine will POST to your login endpoint to obtain a bearer token automatically.</p>
+              <div>
+                <label className="block text-[10px] font-medium uppercase tracking-wider mb-1" style={{ color: 'var(--color-muted)' }}>Login endpoint URL</label>
+                <input aria-label={`${identity.label} login url`} className={input}
+                  placeholder={baseUrl ? `${baseUrl}/api/auth/login` : 'https://api.example.com/auth/login'}
+                  value={identity.login_url || ''}
+                  onChange={e => onUpdate('login_url', e.target.value)} />
+              </div>
+              <div className="grid gap-2 sm:grid-cols-2">
+                <div>
+                  <label className="block text-[10px] font-medium uppercase tracking-wider mb-1" style={{ color: 'var(--color-muted)' }}>Email / username</label>
+                  <input aria-label={`${identity.label} email`} className={input}
+                    placeholder="user@example.com"
+                    value={(identity.login_body as any)?.email || ''}
+                    onChange={e => onUpdate('login_body', { ...(identity.login_body || {}), email: e.target.value })} />
+                </div>
+                <div>
+                  <label className="block text-[10px] font-medium uppercase tracking-wider mb-1" style={{ color: 'var(--color-muted)' }}>Password</label>
+                  <PasswordInput ariaLabel={`${identity.label} password`} placeholder="••••••••"
+                    value={identity.credential ?? ''}
+                    onChange={v => {
+                      onUpdate('credential', v)
+                      onUpdate('login_body', { ...(identity.login_body || {}), password: v })
+                    }} />
+                </div>
+              </div>
+            </div>
+          )}
+
+          {credType === 'api_key' && (
+            <div>
+              <label className="block text-[10px] font-medium uppercase tracking-wider mb-1" style={{ color: 'var(--color-muted)' }}>API Key</label>
+              <PasswordInput ariaLabel={`${identity.label} credential`} placeholder="Your API key (sent as X-API-Key header)" value={identity.credential ?? ''} onChange={v => onUpdate('credential', v)} />
+            </div>
+          )}
+        </div>
+      )}
     </div>
   )
 }
@@ -162,7 +207,7 @@ export default function NewScan() {
   const createTarget = () => run('target', async () => { setTarget(await api.createTarget({ base_url: url, environment: 'sandbox', attested_by: 'demo' })); setSpec(null); setVerified({}) })
   const upload = (f?: File) => f && target && run('spec', async () => { setSpec(await api.uploadSpec(target.id, f)); setVerified({}) })
   const verify = () => target && run('verify', async () => { await api.setIdentities(target.id, ids); const r = await api.verify(target.id); setVerified(Object.fromEntries(r.results.map(x => [x.identity, x.ok]))) })
-  const setId = (i: number, k: 'label' | 'role' | 'user_id' | 'credential', v: string) => { setIds(p => p.map((x, j) => j === i ? { ...x, [k]: v } : x)); setVerified({}) }
+  const setId = (i: number, k: keyof Identity, v: any) => { setIds(p => p.map((x, j) => j === i ? { ...x, [k]: v } : x)); setVerified({}) }
   const addIdentity = () => {
     const n = ids.length + 1
     setIds(p => [...p, { label: `identity${n}`, role: 'user', user_id: '', credential: '' }])
@@ -238,6 +283,7 @@ export default function NewScan() {
                 index={n}
                 verified={st}
                 isCustom={!isSandboxDefault}
+                baseUrl={target?.base_url}
                 onUpdate={(k, v) => setId(n, k, v)}
                 onRemove={!isSandboxDefault ? () => removeIdentity(n) : undefined}
               />
