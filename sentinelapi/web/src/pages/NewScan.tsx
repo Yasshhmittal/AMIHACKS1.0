@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { CheckCircle2, CircleAlert, FileJson, KeyRound, ShieldCheck, XCircle } from 'lucide-react'
+import { CheckCircle2, CircleAlert, Eye, EyeOff, FileJson, KeyRound, Plus, ShieldCheck, Trash2, UserPlus, XCircle } from 'lucide-react'
 import { api } from '../lib/api'
 import { CHECK_DEFS } from '../lib/format'
 import { Panel, Pill } from '../components/ui'
@@ -25,6 +25,126 @@ function Head({ n, title, done }: { n: number; title: string; done?: boolean }) 
   )
 }
 
+/* ── Password Input with Eye Toggle ── */
+function PasswordInput({ value, onChange, disabled, placeholder, ariaLabel }: {
+  value: string; onChange: (v: string) => void; disabled?: boolean; placeholder?: string; ariaLabel?: string
+}) {
+  const [visible, setVisible] = useState(false)
+  return (
+    <div className="relative w-full">
+      <input
+        aria-label={ariaLabel}
+        type={visible ? 'text' : 'password'}
+        className={input}
+        placeholder={placeholder}
+        value={value}
+        disabled={disabled}
+        onChange={e => onChange(e.target.value)}
+        style={{ paddingRight: disabled ? undefined : '40px' }}
+      />
+      {!disabled && (
+        <button
+          type="button"
+          tabIndex={-1}
+          onClick={() => setVisible(v => !v)}
+          className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded-lg transition-colors hover:bg-ink/5"
+          style={{ color: 'var(--color-muted)' }}
+          title={visible ? 'Hide credential' : 'Show credential'}
+        >
+          {visible ? <EyeOff size={15} /> : <Eye size={15} />}
+        </button>
+      )}
+    </div>
+  )
+}
+
+/* ── Identity Card ── */
+function IdentityCard({ identity, note, index, verified, onUpdate, onRemove, isCustom }: {
+  identity: Identity; note?: string; index: number; verified: boolean | null; onUpdate: (k: 'label' | 'role' | 'user_id' | 'credential', v: string) => void; onRemove?: () => void; isCustom?: boolean
+}) {
+  const isAnon = identity.label === 'anonymous'
+  const roleColors: Record<string, { bg: string; text: string; border: string }> = {
+    anonymous: { bg: 'rgba(107,113,120,0.08)', text: '#6B7178', border: 'rgba(107,113,120,0.2)' },
+    user: { bg: 'rgba(72,176,247,0.08)', text: '#48B0F7', border: 'rgba(72,176,247,0.2)' },
+    admin: { bg: 'rgba(110,86,247,0.08)', text: '#6E56F7', border: 'rgba(110,86,247,0.2)' },
+  }
+  const roleStyle = roleColors[identity.role] || roleColors.user
+
+  return (
+    <div className="rounded-2xl border p-4 transition-all relative group" style={{
+      borderColor: verified === true ? 'color-mix(in srgb, var(--color-lime2) 50%, transparent)' : verified === false ? 'color-mix(in srgb, var(--color-sev-critical) 40%, transparent)' : 'var(--color-hair)',
+      background: verified === true ? 'color-mix(in srgb, var(--color-lime) 4%, var(--color-paper))' : 'var(--color-paper)',
+      boxShadow: '0 2px 8px -4px rgba(0,0,0,0.06)',
+    }}>
+      {/* Header row */}
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-2.5">
+          <div className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold uppercase" style={{ background: roleStyle.bg, color: roleStyle.text, border: `1px solid ${roleStyle.border}` }}>
+            {identity.label.charAt(0)}
+          </div>
+          <div>
+            {isCustom ? (
+              <input aria-label={`${identity.label} name`} className="text-sm font-bold bg-transparent outline-none border-b border-dashed border-hair focus:border-ink mono w-28" value={identity.label} onChange={e => onUpdate('label', e.target.value)} placeholder="identity name" />
+            ) : (
+              <p className="mono text-sm font-bold">{identity.label}</p>
+            )}
+            <p className="text-[11px]" style={{ color: 'var(--color-muted)' }}>{note || identity.role}</p>
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          {/* Status badge */}
+          <span className="flex items-center gap-1.5 text-xs font-semibold">
+            {verified === null ? <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px]" style={{ background: 'var(--color-cream2)', color: 'var(--color-muted)' }}>unchecked</span>
+              : verified ? <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px]" style={{ background: 'color-mix(in srgb, var(--color-lime) 20%, transparent)', color: '#3f5f00' }}><CheckCircle2 size={12} /> valid</span>
+                : <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px]" style={{ background: 'color-mix(in srgb, var(--color-sev-critical) 10%, transparent)', color: 'var(--color-sev-critical)' }}><XCircle size={12} /> failed</span>}
+          </span>
+          {isCustom && onRemove && (
+            <button onClick={onRemove} className="opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded-lg hover:bg-red-50" style={{ color: 'var(--color-sev-critical)' }} title="Remove identity">
+              <Trash2 size={14} />
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Fields */}
+      <div className="grid gap-2 sm:grid-cols-[1fr_auto_2fr]">
+        <div>
+          <label className="block text-[10px] font-medium uppercase tracking-wider mb-1" style={{ color: 'var(--color-muted)' }}>Role</label>
+          <select
+            aria-label={`${identity.label} role`}
+            className={`${input} appearance-none cursor-pointer`}
+            value={identity.role}
+            disabled={isAnon}
+            onChange={e => onUpdate('role', e.target.value)}
+          >
+            <option value="anonymous">anonymous</option>
+            <option value="user">user</option>
+            <option value="admin">admin</option>
+            <option value="service">service</option>
+            <option value="readonly">readonly</option>
+          </select>
+        </div>
+        <div>
+          <label className="block text-[10px] font-medium uppercase tracking-wider mb-1" style={{ color: 'var(--color-muted)' }}>User ID</label>
+          <input aria-label={`${identity.label} id`} className={input} placeholder={isAnon ? '—' : 'e.g. 1, uuid…'} value={identity.user_id || ''} disabled={isAnon} onChange={e => onUpdate('user_id', e.target.value)} />
+        </div>
+        <div>
+          <label className="block text-[10px] font-medium uppercase tracking-wider mb-1" style={{ color: 'var(--color-muted)' }}>
+            {isAnon ? 'Credential' : 'API Token / Password'}
+          </label>
+          <PasswordInput
+            ariaLabel={`${identity.label} credential`}
+            placeholder={isAnon ? 'No authentication' : 'Bearer token, API key, or password'}
+            value={identity.credential ?? ''}
+            disabled={isAnon}
+            onChange={v => onUpdate('credential', v)}
+          />
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export default function NewScan() {
   const nav = useNavigate()
   const [url, setUrl] = useState('http://sentinelshop:4000')
@@ -42,7 +162,13 @@ export default function NewScan() {
   const createTarget = () => run('target', async () => { setTarget(await api.createTarget({ base_url: url, environment: 'sandbox', attested_by: 'demo' })); setSpec(null); setVerified({}) })
   const upload = (f?: File) => f && target && run('spec', async () => { setSpec(await api.uploadSpec(target.id, f)); setVerified({}) })
   const verify = () => target && run('verify', async () => { await api.setIdentities(target.id, ids); const r = await api.verify(target.id); setVerified(Object.fromEntries(r.results.map(x => [x.identity, x.ok]))) })
-  const setId = (i: number, k: 'role' | 'user_id' | 'credential', v: string) => { setIds(p => p.map((x, j) => j === i ? { ...x, [k]: v } : x)); setVerified({}) }
+  const setId = (i: number, k: 'label' | 'role' | 'user_id' | 'credential', v: string) => { setIds(p => p.map((x, j) => j === i ? { ...x, [k]: v } : x)); setVerified({}) }
+  const addIdentity = () => {
+    const n = ids.length + 1
+    setIds(p => [...p, { label: `identity${n}`, role: 'user', user_id: '', credential: '' }])
+    setVerified({})
+  }
+  const removeIdentity = (i: number) => { setIds(p => p.filter((_, j) => j !== i)); setVerified({}) }
   const allVerified = ids.every(i => verified[i.label])
   const ready = !!spec && allVerified && attested && checks.length > 0
   const start = () => target && spec && run('start', async () => { const s = await api.startScan({ target_id: target.id, spec_id: spec.spec_id, checks }); nav(`/scan/${s.id}/live`) })
@@ -51,7 +177,7 @@ export default function NewScan() {
     <div className="mx-auto max-w-4xl space-y-6">
       <Reveal>
         <h1 className="font-display text-4xl font-bold tracking-tight">New scan</h1>
-        <p className="mt-1 max-w-2xl text-sm text-ink2">Point SentinelAPI at an API you own, prove who each caller is, and it will test whether one user can reach another user’s data — with real HTTP evidence for every finding.</p>
+        <p className="mt-1 max-w-2xl text-sm text-ink2">Point SentinelAPI at an API you own, prove who each caller is, and it will test whether one user can reach another user's data — with real HTTP evidence for every finding.</p>
       </Reveal>
 
       {err && <div className="rounded-xl px-4 py-3 text-sm" style={{ border: '1px solid color-mix(in srgb,var(--color-sev-critical) 40%,transparent)', color: 'var(--color-sev-critical)', background: 'color-mix(in srgb,var(--color-sev-critical) 6%,transparent)' }}>{err}</div>}
@@ -83,26 +209,51 @@ export default function NewScan() {
         </div>}
       </Panel></Reveal>
 
+      {/* ── Identities Section (Redesigned) ── */}
       <Reveal><Panel className={`p-6 ${spec ? '' : 'pointer-events-none opacity-40'}`}>
         <Head n={3} title="Identities" done={allVerified && Object.keys(verified).length > 0} />
-        <p className="mb-4 flex items-center gap-2 text-xs text-muted"><KeyRound size={14} /> The scanner logs in as each identity and compares what each can reach. Credentials are encrypted server-side and never shown again.</p>
-        <div className="space-y-2.5">
-          {ids.map((i, n) => {
-            const st = i.label in verified ? verified[i.label] : null
+
+        {/* Info banner */}
+        <div className="mb-5 rounded-xl p-3 flex items-start gap-3" style={{ background: 'color-mix(in srgb, var(--color-sky) 6%, transparent)', border: '1px solid color-mix(in srgb, var(--color-sky) 20%, transparent)' }}>
+          <KeyRound size={16} className="shrink-0 mt-0.5" style={{ color: 'var(--color-sky)' }} />
+          <div>
+            <p className="text-xs font-semibold" style={{ color: 'var(--color-ink)' }}>How identities work</p>
+            <p className="text-[11px] mt-0.5" style={{ color: 'var(--color-muted)' }}>
+              Define who accesses your API. SentinelAPI logs in as each identity and compares what resources each can reach.
+              Credentials are encrypted server-side and never shown again after verification.
+            </p>
+          </div>
+        </div>
+
+        {/* Identity Cards */}
+        <div className="space-y-3">
+          {ids.map((identity, n) => {
+            const st = identity.label in verified ? verified[identity.label] : null
+            const isSandboxDefault = n < SANDBOX_IDS.length
             return (
-              <div key={i.label} className="grid grid-cols-[8.5rem_1fr] items-center gap-3 sm:grid-cols-[8.5rem_5rem_5rem_1fr_6rem]">
-                <div><p className="mono text-sm font-bold">{i.label}</p><p className="text-[11px] text-muted">{NOTE[i.label]}</p></div>
-                <input aria-label={`${i.label} role`} className={`${input} hidden sm:block`} value={i.role} disabled={i.label === 'anonymous'} onChange={e => setId(n, 'role', e.target.value)} />
-                <input aria-label={`${i.label} id`} className={`${input} hidden sm:block`} placeholder="id" value={i.user_id} disabled={i.label === 'anonymous'} onChange={e => setId(n, 'user_id', e.target.value)} />
-                <input aria-label={`${i.label} credential`} type="password" className={input} placeholder={i.label === 'anonymous' ? 'none' : 'token or password'} value={i.credential ?? ''} disabled={i.label === 'anonymous'} onChange={e => setId(n, 'credential', e.target.value)} />
-                <span className="flex items-center justify-end gap-1.5 text-xs font-semibold">
-                  {st === null ? <span className="text-muted">unchecked</span> : st ? <span className="flex items-center gap-1 text-lime2"><CheckCircle2 size={14} /> valid</span> : <span className="flex items-center gap-1" style={{ color: 'var(--color-sev-critical)' }}><XCircle size={14} /> failed</span>}
-                </span>
-              </div>
+              <IdentityCard
+                key={`${identity.label}-${n}`}
+                identity={identity}
+                note={NOTE[identity.label]}
+                index={n}
+                verified={st}
+                isCustom={!isSandboxDefault}
+                onUpdate={(k, v) => setId(n, k, v)}
+                onRemove={!isSandboxDefault ? () => removeIdentity(n) : undefined}
+              />
             )
           })}
         </div>
-        <button onClick={verify} disabled={busy === 'verify'} className="mt-4 inline-flex items-center gap-2 rounded-full border border-hair bg-paper px-5 py-2.5 text-sm font-semibold hover:bg-cream2"><ShieldCheck size={15} /> {busy === 'verify' ? 'Verifying…' : 'Verify credentials'}</button>
+
+        {/* Add Identity + Verify */}
+        <div className="mt-4 flex items-center gap-3 flex-wrap">
+          <button onClick={addIdentity} className="inline-flex items-center gap-2 rounded-full border border-dashed border-hair bg-paper/50 px-4 py-2.5 text-sm font-medium transition-colors hover:bg-cream2 hover:border-ink2" style={{ color: 'var(--color-ink2)' }}>
+            <UserPlus size={15} /> Add identity
+          </button>
+          <button onClick={verify} disabled={busy === 'verify'} className="inline-flex items-center gap-2 rounded-full border border-hair bg-paper px-5 py-2.5 text-sm font-semibold hover:bg-cream2">
+            <ShieldCheck size={15} /> {busy === 'verify' ? 'Verifying…' : 'Verify credentials'}
+          </button>
+        </div>
       </Panel></Reveal>
 
       <Reveal><Panel className={`p-6 ${spec ? '' : 'pointer-events-none opacity-40'}`}>
