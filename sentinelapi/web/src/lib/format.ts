@@ -34,10 +34,10 @@ export const CHECK_DEFS = [
 export const IDENTITY_ORDER = ['anonymous', 'userA', 'userB', 'admin']
 
 export function statusColor(status: number): string {
-  if (status === 0) return 'var(--color-dim)'
-  if (status >= 200 && status < 300) return 'var(--color-emerald)'
-  if (status === 401 || status === 403) return 'var(--color-teal)'
-  if (status === 404) return 'var(--color-dim)'
+  if (status === 0) return 'var(--color-muted)'
+  if (status >= 200 && status < 300) return 'var(--color-lime2)'
+  if (status === 401 || status === 403) return 'var(--color-ink2)'
+  if (status === 404) return 'var(--color-muted)'
   if (status >= 500) return 'var(--color-sev-critical)'
   return 'var(--color-sev-medium)'
 }
@@ -48,13 +48,7 @@ export function fmtMs(ms?: number | null): string {
   return `${(ms / 1000).toFixed(1)} s`
 }
 
-export function timeAgoClock(iso?: string | null): string {
-  if (!iso) return '—'
-  try { return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) }
-  catch { return '—' }
-}
-
-export function classify(status: number, spec_secured: boolean, mismatch: boolean): 'ok' | 'violation' | 'denied' | 'warn' | 'none' {
+export function classify(status: number, _secured: boolean, mismatch: boolean): 'ok' | 'violation' | 'denied' | 'warn' | 'none' {
   if (status === 0) return 'none'
   if (mismatch) return 'violation'
   if (status === 401 || status === 403) return 'denied'
