@@ -22,7 +22,7 @@ services:
     environment:
       DATABASE_URL: "sqlite:////data/sentinel.db"
       GROQ_API_KEY: "${GROQ_API_KEY:-}"
-      SENTINEL_ALLOW_PUBLIC: "0"
+      SENTINEL_ALLOW_PUBLIC: "1"
       SENTINEL_PORT: "8000"
     volumes:
       - sentineldata:/data

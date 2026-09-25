@@ -99,7 +99,7 @@ function IdentityCard({ identity, note, index, verified, onUpdate, onRemove, isC
               : verified ? <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px]" style={{ background: 'color-mix(in srgb, var(--color-lime) 20%, transparent)', color: '#3f5f00' }}><CheckCircle2 size={12} /> valid</span>
                 : <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px]" style={{ background: 'color-mix(in srgb, var(--color-sev-critical) 10%, transparent)', color: 'var(--color-sev-critical)' }}><XCircle size={12} /> failed</span>}
           </span>
-          {isCustom && onRemove && (
+          {onRemove && (
             <button onClick={onRemove} className="opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded-lg hover:bg-red-50" style={{ color: 'var(--color-sev-critical)' }} title="Remove identity">
               <Trash2 size={14} />
             </button>
@@ -282,10 +282,10 @@ export default function NewScan() {
                 note={NOTE[identity.label]}
                 index={n}
                 verified={st}
-                isCustom={!isSandboxDefault}
+                isCustom={n > 0}
                 baseUrl={target?.base_url}
                 onUpdate={(k, v) => setId(n, k, v)}
-                onRemove={!isSandboxDefault ? () => removeIdentity(n) : undefined}
+                onRemove={n > 0 ? () => removeIdentity(n) : undefined}
               />
             )
           })}
